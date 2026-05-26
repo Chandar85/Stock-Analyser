@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Stock Analyzer">
+  <meta name="theme-color" content="#0f172a">
+  <title>Stock Analyzer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    :root{--bg:#0f172a;--s1:#1e293b;--s2:#334155;--b1:#334155;--b2:#475569;
+      --t1:#f1f5f9;--t2:#94a3b8;--t3:#64748b;--t4:#475569;
+      --blue:#3b82f6;--green:#22c55e;--yellow:#eab308;--orange:#f97316;--red:#ef4444;}
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+    html,body{height:100%;background:var(--bg)}
+    body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif;
+      color:var(--t1);min-height:100vh}
+    #root{max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column}
+    input{background:var(--s2);border:1.5px solid var(--b1);border-radius:10px;color:var(--t1);
+      padding:13px 16px;font-size:16px;width:100%;outline:none;transition:border-color .2s;
+      -webkit-appearance:none;appearance:none;font-family:inherit}
+    input:focus{border-color:var(--blue)}
+    input::placeholder{color:var(--t4)}
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none}
+    button{cursor:pointer;border:none;font-family:inherit;transition:opacity .15s}
+    button:active{opacity:.75}
+    ::-webkit-scrollbar{width:3px}
+    ::-webkit-scrollbar-thumb{background:var(--s2);border-radius:4px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body><div id="root"></div>
+<script type="text/babel">
+const { useState, useReducer, useMemo, useEffect } = React;
+
+/* ═══════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════ */
+const AV = 'https://www.alphavantage.co/query';
+// ─── Embedded key: friends use the app without needing their own key ──────────
+const EMBEDDED_KEY = '5F5DJ4ZFLR7FJPGV';
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SECTOR_PE_US = {
+  'Technology':38,'Information Technology':38,'Software':45,'Semiconductors':35,
+  'Internet Content':40,'Health Care':27,'Healthcare':27,'Biotechnology':30,'Pharmaceuticals':22,
+  'Financials':14,'Finance':14,'Banks':12,'Insurance':12,
+  'Consumer Discretionary':26,'Retail':25,'Consumer Staples':22,
+  'Industrials':23,'Aerospace':25,'Energy':13,'Materials':19,
+  'Real Estate':35,'Utilities':19,'Communication':26,'Telecom':18,
+};
+
+// Known AI leaders — these automatically score 10 for AI Advantage
+const AI_LEADERS = new Set(['NVDA','MSFT','GOOGL','GOOG','META','AMZN','PLTR','AMD','AI','SOUN','BBAI','ORCL','IBM','TSLA','BAIDU','BIDU','SNOW','PATH','UPST']);
+
+// Whale / super-investor detection list
+const WHALES = [
+  {name:'Warren Buffett',  icon:'🏦', terms:['buffett','berkshire hathaway','berkshire']},
+  {name:'Elon Musk',       icon:'🚀', terms:['elon musk','musk buys','musk purchases']},
+  {name:'Donald Trump',    icon:'🇺🇸', terms:['trump','president trump','trump media']},
+  {name:'Cathie Wood',     icon:'📈', terms:['cathie wood','ark invest','arkk','ark innovation']},
+  {name:'Michael Burry',   icon:'🎯', terms:['michael burry','scion asset','big short burry']},
+  {name:'Ray Dalio',       icon:'🌊', terms:['ray dalio','bridgewater associates']},
+  {name:'Bill Ackman',     icon:'💼', terms:['bill ackman','ackman','pershing square']},
+  {name:'Carl Icahn',      icon:'⚔️', terms:['carl icahn','icahn enterprises']},
+  {name:'Druckenmiller',   icon:'🎲', terms:['druckenmiller','duquesne capital']},
+  {name:'George Soros',    icon:'🌐', terms:['george soros','soros fund']},
+  {name:'Ken Griffin',     icon:'🏰', terms:['ken griffin','citadel']},
+  {name:'Stanley Druckenmiller', icon:'📊', terms:['druckenmiller']},
+  {name:'Saudi PIF',       icon:'🛢️', terms:['saudi arabia','saudi pif','public investment fund']},
+  {name:'SoftBank / Masa', icon:'🗾', terms:['softbank','masayoshi son']},
+  {name:'Norway Fund',     icon:'🇳🇴', terms:['norges bank','norway fund','government pension fund']},
+];
+
+/* ═══════════════════════════════════════════
+   API LAYER  (Alpha Vantage)
+═══════════════════════════════════════════ */
+function getSectorPe(sector, industry) {
+  const text = ((sector||'') + ' ' + (industry||'')).toLowerCase();
+  for (const [k, v] of Object.entries(SECTOR_PE_US))
+    if (text.includes(k.toLowerCase())) return v;
+  return 22;
+}
+
+// Cache fundamentals for 23h (AV data is quarterly — no need to refetch daily)
+const CACHE_TTL = 23 * 60 * 60 * 1000;
+function getCache(ticker, key) {
+  try {
+    const raw = localStorage.getItem(`sa_${key}_${ticker}`);
+    if (!raw) return null;
+    const {ts, data} = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_TTL) { localStorage.removeItem(`sa_${key}_${ticker}`); return null; }
+    return data;
+  } catch(e) { return null; }
+}
+function setCache(ticker, key, data) {
+  try { localStorage.setItem(`sa_${key}_${ticker}`, JSON.stringify({ts: Date.now(), data})); } catch(e) {}
+}
+
+function avRateError(msg) {
+  const isDaily = msg.includes('25') || msg.includes('per day') || msg.includes('daily');
+  throw new Error(isDaily
+    ? 'Daily API limit reached (25 calls/day). Resets at midnight UTC.\nTip: wait until tomorrow or upgrade at alphavantage.co/premium.'
+    : 'Rate limit hit — max 5 requests/min. Wait 60 seconds and try again.');
+}
+
+async function fetchAll(rawTicker) {
+  const apiKey = EMBEDDED_KEY;
+  const sym = rawTicker.toUpperCase();
+
+  // Pull from cache when possible (saves 2 of 4 daily calls on repeat analyses)
+  let ov = getCache(sym, 'ov');
+  let inc = getCache(sym, 'inc');
+
+  if (!ov) {
+    const r = await fetch(`${AV}?function=OVERVIEW&symbol=${sym}&apikey=${apiKey}`);
+    ov = await r.json();
+    const msg = ((ov['Note']||ov['Information'])||'').toLowerCase();
+    if (msg && (msg.includes('rate')||msg.includes('standard api')||msg.includes('limit'))) avRateError(msg);
+    if (!ov.Symbol && !ov.Name)
+      throw new Error(`"${sym}" not found. Check the ticker symbol (e.g. AAPL, NVDA, INTC, MSFT).`);
+    setCache(sym, 'ov', ov);
+  }
+
+  const sixMonthsAgo = new Date(Date.now()-180*24*60*60*1000).toISOString().split('T')[0];
+  const fetches = [
+    fetch(`${AV}?function=GLOBAL_QUOTE&symbol=${sym}&apikey=${apiKey}`),
+    fetch(`${AV}?function=NEWS_SENTIMENT&tickers=${sym}&apikey=${apiKey}&limit=50`),
+    fetch(`https://efts.sec.gov/LATEST/search-index?q=%22${sym}%22&forms=4&dateRange=custom&startdt=${sixMonthsAgo}`).catch(()=>null),
+  ];
+  if (!inc) fetches.unshift(fetch(`${AV}?function=INCOME_STATEMENT&symbol=${sym}&apikey=${apiKey}`));
+
+  const results = await Promise.all(fetches);
+  let qR, newsR, edgarR, incR;
+  if (!inc) [incR, qR, newsR, edgarR] = results;
+  else      [qR, newsR, edgarR] = results;
+
+  const [q, news] = await Promise.all([qR.json(), newsR.json()]);
+  const edgar = edgarR ? await edgarR.json().catch(()=>null) : null;
+
+  if (!inc) {
+    inc = await incR.json();
+    const m = ((inc['Note']||inc['Information'])||'').toLowerCase();
+    if (m && (m.includes('rate')||m.includes('standard api')||m.includes('limit'))) avRateError(m);
+    setCache(sym, 'inc', inc);
+  }
+  for (const d of [q, news]) {
+    const m = ((d['Note']||d['Information'])||'').toLowerCase();
+    if (m && (m.includes('rate')||m.includes('standard api')||m.includes('limit'))) avRateError(m);
+  }
+  return { ov, inc, q, news, edgar };
+}
+
+// Extract revenue from an income statement report, trying multiple field names
+// Alpha Vantage uses different fields for different company types
+function extractRevenue(report) {
+  const fields = ['totalRevenue','totalRevenueAsReported','revenues','netRevenues',
+                  'netIncome','totalNonInterestIncome','totalInterestAndDividendIncome'];
+  for (const f of fields) {
+    const v = parseFloat(report[f]);
+    if (!isNaN(v) && v > 0) return v;
+  }
+  return null;
+}
+
+function n(v) { const x = parseFloat(v); return isNaN(x) ? null : x; }
+function pct(v) { const x = n(v); return x === null ? null : x > 1 ? x : x * 100; }
+function fmtM(v) {
+  if (!v||v==='None') return null;
+  const x=parseFloat(v);
+  if (isNaN(x)||x===0) return null;
+  return x>=1e12?`$${(x/1e12).toFixed(2)}T`:x>=1e9?`$${(x/1e9).toFixed(1)}B`:x>=1e6?`$${(x/1e6).toFixed(0)}M`:null;
+}
+
+/* ═══════════════════════════════════════════
+   SCORING ENGINE — ALL 8 FILTERS AUTO
+═══════════════════════════════════════════ */
+
+// F1: Revenue Growth (5-year)
+function scoreF1(growths) {
+  if (!growths?.length) return { score:0, avg:0, trend:'unknown', count:0, reason:'Revenue history unavailable.' };
+  const vals = growths.map(parseFloat).filter(v=>!isNaN(v));
+  if (!vals.length) return { score:0, avg:0, trend:'unknown', count:0, reason:'Revenue data could not be parsed.' };
+  const avg = vals.reduce((a,b)=>a+b,0)/vals.length;
+  let trend='stable';
+  if (vals.length>=3) {
+    const mid=Math.floor(vals.length/2);
+    const fa=vals.slice(0,mid).reduce((a,b)=>a+b,0)/mid;
+    const la=vals.slice(-mid).reduce((a,b)=>a+b,0)/mid;
+    if (la>fa+5) trend='accelerating'; else if (la<fa-5) trend='decelerating';
+  }
+  let base=avg<0?1:avg<5?2.5:avg<10?5:avg<20?7:avg<40?9:10;
+  if (trend==='accelerating') base=Math.min(10,base+0.5);
+  if (trend==='decelerating') base=Math.max(1,base-1);
+  const score=parseFloat(Math.min(10,Math.max(1,base)).toFixed(1));
+  const trendLabel=trend==='accelerating'?'↑ Accelerating':trend==='decelerating'?'↓ Decelerating':'→ Stable';
+  const reason=`5-year avg revenue growth: ${avg>0?'+':''}${avg.toFixed(1)}%. Trend: ${trendLabel}. `
+    +(avg<0?'Declining revenue is a red flag — business may be in structural decline.'
+      :avg<5?'Near-stagnant growth. Barely keeping pace with inflation.'
+      :avg<10?'Moderate, steady growth. Solid but not exciting.'
+      :avg<20?'Double-digit growth. Business is genuinely expanding.'
+      :avg<40?'Strong revenue acceleration. Wealth-compounding territory.'
+      :'Exceptional growth. Elite-tier revenue expansion.');
+  return { score, avg:parseFloat(avg.toFixed(1)), trend, count:vals.length, reason };
+}
+
+// F2: Competitive Position — auto from gross margin, op margin, beta, consistency
+function scoreF2(ov, growths) {
+  let pts=0, max=0, bullets=[];
+  const gProfit=n(ov.GrossProfitTTM), rev=n(ov.RevenueTTM);
+  const opM=pct(ov.OperatingMarginTTM), beta=n(ov.Beta), mktCap=n(ov.MarketCapitalization);
+
+  if (gProfit!==null && rev!==null && rev>0) {
+    const gm=(gProfit/rev*100);
+    max+=3; pts+=gm>=70?3:gm>=50?2:gm>=30?1:0.3;
+    bullets.push(`Gross margin: ${gm.toFixed(0)}% ${gm>=70?'(elite pricing power ✓)':gm>=50?'(strong ✓)':gm>=30?'(moderate)':'(thin — competitive pressure)'}`);
+  }
+  if (opM!==null) {
+    max+=2; pts+=opM>=25?2:opM>=15?1.5:opM>=5?1:opM>0?0.5:0;
+    bullets.push(`Operating margin: ${opM.toFixed(1)}% ${opM>=25?'(highly efficient ✓)':opM>=10?'(healthy)':opM>0?'(lean)':'(loss-making — watch closely)'}`);
+  }
+  if (growths?.length>=3) {
+    const pos=growths.filter(g=>parseFloat(g)>0).length;
+    max+=2; pts+=pos>=4?2:pos>=3?1.5:pos>=2?1:0.5;
+    bullets.push(`Revenue positive in ${pos}/${growths.length} years ${pos>=4?'(consistent growth ✓)':'(inconsistent)'}`);
+  }
+  if (beta!==null && beta>0) {
+    max+=2; pts+=beta<=0.8?2:beta<=1.2?1.5:beta<=1.8?1:0.5;
+    bullets.push(`Beta: ${beta.toFixed(2)} ${beta<=0.8?'(defensive/stable ✓)':beta<=1.2?'(market-level)':'(high volatility)'}`);
+  }
+  if (mktCap!==null) {
+    max+=1; pts+=mktCap>=50e9?1:mktCap>=10e9?.7:mktCap>=1e9?.4:.1;
+    bullets.push(`Market cap: ${fmtM(ov.MarketCapitalization)||'—'} ${mktCap>=50e9?'(established brand ✓)':mktCap>=10e9?'(mid-size)':'(small-cap)'}`);
+  }
+  if (!max) return { score:5, reason:'Insufficient data to score competitive position.' };
+  const score=parseFloat(Math.min(10,Math.max(1,(pts/max)*10)).toFixed(1));
+  return { score, reason: bullets.join('. ')+'.' };
+}
+
+// F3: Leadership Integrity — auto from insider %, ROE, margins, consistency
+function scoreF3(ov, growths) {
+  let pts=0, max=0, bullets=[];
+  const insiderPct=pct(ov.PercentInsidersOwnership);
+  const roe=pct(ov.ReturnOnEquityTTM), pm=pct(ov.ProfitMargin);
+
+  if (insiderPct!==null) {
+    max+=4; pts+=insiderPct>=20?4:insiderPct>=10?3.5:insiderPct>=5?3:insiderPct>=2?2:insiderPct>=0.5?1:0.5;
+    bullets.push(`Insider ownership: ${insiderPct.toFixed(1)}% ${insiderPct>=10?'(strong skin-in-the-game ✓)':insiderPct>=5?'(meaningful ✓)':insiderPct>=1?'(low)':'(negligible — misalignment risk)'}`);
+  }
+  if (roe!==null) {
+    max+=2; pts+=roe>=25?2:roe>=15?1.5:roe>=5?1:roe>0?.5:0;
+    bullets.push(`Return on equity: ${roe.toFixed(1)}% ${roe>=25?'(excellent capital allocation ✓)':roe>=10?'(solid)':roe>0?'(moderate)':'(negative — capital destruction risk)'}`);
+  }
+  if (pm!==null) {
+    max+=2; pts+=pm>=20?2:pm>=10?1.5:pm>=0?1:0;
+    bullets.push(`Profit margin: ${pm.toFixed(1)}% ${pm>=20?'(highly profitable ✓)':pm>=5?'(positive)':pm>=0?'(breakeven)':'(loss-making)'}`);
+  }
+  if (growths?.length>=3) {
+    const pos=growths.filter(g=>parseFloat(g)>0).length;
+    max+=2; pts+=pos>=4?2:pos>=3?1.5:pos>=2?1:0.5;
+    bullets.push(`Execution track record: ${pos}/${growths.length} years of growth ${pos>=4?'(consistent delivery ✓)':'(inconsistent)'}`);
+  }
+  if (!max) return { score:5, reason:'Insufficient data to score leadership quality.' };
+  const score=parseFloat(Math.min(10,Math.max(1,(pts/max)*10)).toFixed(1));
+  return { score, reason: bullets.join('. ')+'.' };
+}
+
+// F4: Market Timing — auto from 52-wk position, analyst target, recent growth
+function scoreF4(ov, currentPrice) {
+  let pts=0, max=0, bullets=[];
+  const wk52H=n(ov['52WeekHigh']), wk52L=n(ov['52WeekLow']);
+  const target=n(ov.AnalystTargetPrice), qGrowth=pct(ov.QuarterlyRevenueGrowthYOY);
+
+  if (currentPrice>0 && wk52H>0) {
+    const pctBelow=(1-currentPrice/wk52H)*100;
+    max+=4; pts+=pctBelow>=50?4:pctBelow>=30?3.5:pctBelow>=20?3:pctBelow>=10?2:pctBelow>=5?1:0.5;
+    bullets.push(`${pctBelow.toFixed(0)}% below 52-week high of $${wk52H.toFixed(2)} ${pctBelow>=25?'(opportunity window open ✓)':pctBelow>=10?'(mild pullback)':'(near 52-week high — limited upside from here)'}`);
+  }
+  if (target!==null && currentPrice>0) {
+    const upside=((target-currentPrice)/currentPrice*100);
+    max+=3; pts+=upside>=50?3:upside>=25?2.5:upside>=10?2:upside>0?1.5:0.5;
+    bullets.push(`Analyst 12-month target: $${target.toFixed(2)} (${upside>=0?'+':''}${upside.toFixed(0)}% upside) ${upside>=25?'(strong consensus ✓)':upside>0?'(modest upside)':'(downside risk flagged by analysts)'}`);
+  }
+  if (qGrowth!==null) {
+    max+=3; pts+=qGrowth>=30?3:qGrowth>=15?2.5:qGrowth>=5?2:qGrowth>=0?1:0.5;
+    bullets.push(`Most recent quarterly revenue growth: ${qGrowth>0?'+':''}${qGrowth.toFixed(1)}% YoY ${qGrowth>=20?'(accelerating momentum ✓)':qGrowth>=5?'(positive)':'(slowing — timing caution)'}`);
+  }
+  if (!max) return { score:5, reason:'Insufficient price or analyst data for timing assessment.' };
+  const score=parseFloat(Math.min(10,Math.max(1,(pts/max)*10)).toFixed(1));
+  return { score, reason: bullets.join('. ')+'.' };
+}
+
+// F5: Risk Assessment — beta, profitability, stability, size
+function scoreF5(ov, growths) {
+  let pts=0, max=0, bullets=[];
+  const beta=n(ov.Beta), pm=pct(ov.ProfitMargin), mktCap=n(ov.MarketCapitalization);
+
+  if (beta!==null && beta>0) {
+    max+=4; pts+=beta<=0.5?4:beta<=0.8?3.5:beta<=1.0?3:beta<=1.3?2.5:beta<=1.7?2:beta<=2.0?1.5:1;
+    bullets.push(`Beta: ${beta.toFixed(2)} ${beta<=0.8?'(low volatility — stable risk ✓)':beta<=1.2?'(market-level risk)':beta<=1.7?'(elevated volatility)':'(high beta — significant downside risk)'}`);
+  }
+  if (pm!==null) {
+    max+=3; pts+=pm>=20?3:pm>=10?2.5:pm>=0?2:pm>=-10?1:0.5;
+    bullets.push(`Profit margin: ${pm.toFixed(1)}% ${pm>=15?'(profitable — lower financial risk ✓)':pm>=0?'(marginally profitable)':'(loss-making — cash burn risk)'}`);
+  }
+  if (growths?.length>=3) {
+    const noMajorDip=growths.every(g=>parseFloat(g)>-25);
+    max+=2; pts+=noMajorDip?2:1;
+    bullets.push(noMajorDip?'No major revenue collapse in 5 years (stable business ✓)':'Revenue dipped >25% in at least 1 year (cyclicality risk)');
+  }
+  if (mktCap!==null) {
+    max+=1; pts+=mktCap>=100e9?1:mktCap>=10e9?.8:mktCap>=1e9?.5:.2;
+    bullets.push(`${fmtM(ov.MarketCapitalization)||'small'} market cap ${mktCap>=10e9?'(size = stability ✓)':'(small-cap = higher risk)'}`);
+  }
+  if (!max) return { score:5, reason:'Insufficient data to score risk.' };
+  const score=parseFloat(Math.min(10,Math.max(1,(pts/max)*10)).toFixed(1));
+  return { score, reason: bullets.join('. ')+'.' };
+}
+
+// F6: Valuation — P/E vs sector + index, P/B, P/S, PEG
+function scoreF6(ov) {
+  const sector=ov.Sector||'', industry=ov.Industry||'';
+  const sectorPe=getSectorPe(sector,industry), indexPe=22;
+  const scores=[]; let bullets=[];
+
+  function pePts(r){return r<=.7?3:r<=.85?2.5:r<=1?2:r<=1.15?1.5:r<=1.3?1:.5;}
+
+  const pe=n(ov.PERatio), pb=n(ov.PriceToBookRatio), ps=n(ov.PriceToSalesRatioTTM), peg=n(ov.PEGRatio);
+
+  if (pe!==null && pe>0) {
+    scores.push({pts:pePts(pe/sectorPe),max:3});
+    bullets.push(`P/E ${pe.toFixed(1)}x vs sector avg ${sectorPe}x ${pe<sectorPe?'(trading at discount ✓)':'(trading at premium)'}`);
+    scores.push({pts:pePts(pe/indexPe),max:3});
+    bullets.push(`P/E ${pe.toFixed(1)}x vs S&P 500 avg ${indexPe}x`);
+  } else {
+    bullets.push('P/E: N/A (loss-making or not reported — excluded from score)');
+  }
+  if (pb!==null && pb>0) {
+    const pts=pb<=1?2:pb<=2?1.5:pb<=3?1:pb<=5?.5:0;
+    scores.push({pts,max:2});
+    bullets.push(`P/B ${pb.toFixed(1)}x ${pb<=2?'(attractive ✓)':pb<=4?'(elevated)':'(expensive)'}`);
+  }
+  if (ps!==null && ps>0) {
+    const pts=ps<=1?2:ps<=3?1.5:ps<=5?1:ps<=10?.5:0;
+    scores.push({pts,max:2});
+    bullets.push(`P/S ${ps.toFixed(1)}x ${ps<=3?'(reasonable ✓)':ps<=8?'(growth premium)':'(very expensive on revenue basis)'}`);
+  }
+  if (peg!==null && peg>0) {
+    const pts=peg<=.5?2:peg<=1?1.5:peg<=1.5?1:peg<=2?.5:0;
+    scores.push({pts,max:2});
+    bullets.push(`PEG ${peg.toFixed(1)} ${peg<=1?'(undervalued growth ✓)':peg<=1.5?'(fairly priced for growth)':'(expensive relative to growth rate)'}`);
+  }
+
+  if (!scores.length) return { score:0, reason:'No valuation data available from API for this ticker.' };
+  const tot=scores.reduce((s,x)=>s+x.pts,0), mx=scores.reduce((s,x)=>s+x.max,0);
+  const score=parseFloat(Math.min(10,Math.max(1,(tot/mx)*10)).toFixed(1));
+  return { score, reason: bullets.join('. ')+'.' };
+}
+
+// F7: AI Advantage — description + known list + news
+function scoreF7(ov, news, symbol) {
+  const sym=(symbol||'').toUpperCase();
+  const desc=((ov.Description||'')+' '+(ov.Sector||'')+' '+(ov.Industry||'')).toLowerCase();
+  const newsText=(news?.feed||[]).slice(0,20).map(n=>(n.title+' '+(n.summary||'')).toLowerCase()).join(' ');
+
+  // Known leaders
+  if (AI_LEADERS.has(sym)) {
+    const reason=`${sym} is a recognized AI leader. `
+      +(sym==='NVDA'?'NVIDIA dominates AI compute with unmatched GPU/CUDA ecosystem — the picks-and-shovels of the AI gold rush.'
+        :sym==='MSFT'?'Microsoft embedded AI across Azure, Office 365, and Copilot — OpenAI partnership creates deep moat.'
+        :sym==='PLTR'?'Palantir\'s AIP platform has military-grade AI moat in government and enterprise data analytics.'
+        :sym==='META'?'Meta\'s open-source Llama models + massive social data flywheel creates strong AI competitive position.'
+        :sym==='GOOGL'||sym==='GOOG'?'Google/Alphabet owns DeepMind, Gemini, and the world\'s largest AI training dataset.'
+        :sym==='AMD'?'AMD\'s MI300 series directly competes with NVIDIA for AI data center workloads.'
+        :'Established AI platform with measurable competitive advantages in the AI ecosystem.');
+    return { score:10, level:'leader', reason };
+  }
+
+  // Keyword analysis
+  const strongKW=['artificial intelligence','large language model','generative ai','llm','ai platform',
+    'deep learning','neural network','computer vision','nlp','natural language processing'];
+  const modKW=['machine learning','ai-powered','ai capabilities','predictive analytics',
+    'intelligent automation','cognitive computing'];
+
+  const strongHits=strongKW.filter(k=>desc.includes(k)||newsText.includes(k)).length;
+  const modHits=modKW.filter(k=>desc.includes(k)).length;
+  const aiInNews=(news?.feed||[]).slice(0,10)
+    .filter(n=>(n.title+' '+(n.summary||'')).toLowerCase().includes('artificial intelligence')||
+                (n.title+' '+(n.summary||'')).toLowerCase().includes('ai model')).length;
+
+  if (strongHits>=3||(strongHits>=2&&modHits>=2)) {
+    const mktCap=n(ov.MarketCapitalization)||0;
+    if (mktCap>=20e9) {
+      return { score:10, level:'leader', reason:`Strong AI moat detected: ${strongHits} core AI capabilities in business model. Large-cap position suggests established competitive advantage.` };
+    }
+    return { score:7, level:'strong', reason:`Meaningful AI capabilities (${strongHits} core indicators). Building strong position but competing against larger incumbents.` };
+  }
+  if (strongHits>=1||modHits>=3||aiInNews>=3) {
+    return { score:5, level:'participant', reason:`AI is part of the business model but not the primary moat. ${strongHits} strong + ${modHits} moderate AI indicators. Lagging the AI leaders.` };
+  }
+  if (modHits>=1||aiInNews>=1) {
+    return { score:3, level:'adjacent', reason:`Peripheral AI exposure — using AI in products but no clear AI competitive edge. Adjacent beneficiary at best.` };
+  }
+  return { score:0, level:'none', reason:'No meaningful AI footprint in business description or recent news.' };
+}
+
+// F8: Whale & Insider Activity — news (article-level matching) + SEC EDGAR Form 4
+function scoreF8(ov, news, edgar) {
+  const newsItems=(news?.feed||[]).slice(0,50);
+
+  // Broad buy/sell term lists — catches "purchase", "disclosed", "investment" etc.
+  const buyTerms=['buys','buy','bought','purchased','purchase','purchases','acquires','acquiring',
+    'increases stake','adds to','backs','invests','investment','invests in','bets on',
+    'building position','disclosed buying','disclosed purchase','disclosed investment',
+    'disclosed stake','13f','accumulating','loading up','takes stake','takes position',
+    'new position','initiates position','adds stake','increases position','boosts stake',
+    'betting on','backing','insider buy'];
+  const sellTerms=['sells','sell','sold','dumped','reduces stake','exits','trims','offloads',
+    'cuts position','divests','liquidates','decreases stake','reduces position',
+    'exiting position','closing position','trimmed stake','insider sell'];
+
+  // Article-level matching: whale name + buy/sell term anywhere in the SAME article
+  const detected=[];
+  for (const whale of WHALES) {
+    const wArticles=newsItems.filter(item=>{
+      const text=(item.title+' '+(item.summary||'')).toLowerCase();
+      return whale.terms.some(t=>text.includes(t));
+    });
+    if (!wArticles.length) continue;
+    const buying=wArticles.some(item=>{
+      const text=(item.title+' '+(item.summary||'')).toLowerCase();
+      return buyTerms.some(t=>text.includes(t));
+    });
+    const selling=wArticles.some(item=>{
+      const text=(item.title+' '+(item.summary||'')).toLowerCase();
+      return sellTerms.some(t=>text.includes(t));
+    });
+    // Capture headline for display
+    const headline=wArticles[0]?.title||'';
+    detected.push({...whale, buying, selling, headline});
+  }
+
+  // SEC EDGAR Form 4 — actual insider trade filings (corporate insiders only)
+  const edgarHits=edgar?.hits?.hits||[];
+  const recentInsiderCount=edgarHits.length;
+  // display_names sometimes contains both company and filer names; filter out the company
+  const ovName=(ov.Name||'').toLowerCase();
+  const insiderNames=[...new Set(
+    edgarHits.flatMap(h=>(h._source?.display_names||[]))
+      .filter(name=>{
+        const lc=name.toLowerCase();
+        return lc && !lc.includes('inc') && !lc.includes('corp') && !lc.includes('ltd')
+          && !lc.includes('llc') && !ovName.split(' ').some(w=>w.length>3&&lc.includes(w));
+      })
+  )].slice(0,6);
+
+  // Insider & institutional %
+  const insiderPct=pct(ov.PercentInsidersOwnership)||0;
+  const instPct=pct(ov.PercentInstitutionalOwnership)||0;
+
+  // News sentiment
+  const sentiments=newsItems.map(n=>n.overall_sentiment_label||'').filter(Boolean);
+  const bullish=sentiments.filter(s=>s.toLowerCase().includes('bullish')).length;
+  const bearish=sentiments.filter(s=>s.toLowerCase().includes('bearish')).length;
+  const sentimentScore=sentiments.length>0?Math.round((bullish/sentiments.length)*10):5;
+
+  const buyWhales=detected.filter(w=>w.buying);
+  const sellWhales=detected.filter(w=>w.selling);
+  const mentionedWhales=detected.filter(w=>!w.buying&&!w.selling);
+
+  let score=5;
+  if (buyWhales.length>=3) score=10;
+  else if (buyWhales.length===2) score=9;
+  else if (buyWhales.length===1) score=8;
+  else if (mentionedWhales.length>=2) score=7;
+  else if (mentionedWhales.length===1) score=6.5;
+  else if (sellWhales.length>=1) score=3;
+
+  if (insiderPct>=15) score=Math.min(10,score+0.5);
+  else if (insiderPct>=5) score=Math.min(10,score+0.25);
+  if (recentInsiderCount>=5) score=Math.min(10,score+0.5);
+  else if (recentInsiderCount>=2) score=Math.min(10,score+0.25);
+
+  score=parseFloat(((score*0.75)+(sentimentScore*0.25)).toFixed(1));
+
+  let reason='';
+  if (buyWhales.length)
+    reason+=`🐋 Buying: ${buyWhales.map(w=>w.icon+' '+w.name).join(', ')}. `;
+  if (sellWhales.length)
+    reason+=`⚠️ Selling: ${sellWhales.map(w=>w.icon+' '+w.name).join(', ')}. `;
+  if (mentionedWhales.length)
+    reason+=`👀 Mentioned in news: ${mentionedWhales.map(w=>w.icon+' '+w.name).join(', ')} (direction unclear). `;
+  if (recentInsiderCount>0) {
+    reason+=`📋 ${recentInsiderCount} insider Form 4 filing${recentInsiderCount>1?'s':''} (SEC, last 6mo). `;
+    if (insiderNames.length) reason+=`Filers include: ${insiderNames.join(', ')}. `;
+  }
+  reason+=`Insider ownership: ${insiderPct.toFixed(1)}%. Institutional: ${instPct.toFixed(0)}%. `;
+  reason+=`News: ${bullish} bullish / ${bearish} bearish of ${sentiments.length} articles.`;
+  if (!detected.length && insiderPct<2 && recentInsiderCount===0)
+    reason='No notable whale activity in recent news. '+reason;
+
+  return { score:Math.min(10,Math.max(1,score)), detected, insiderNames,
+           recentInsiderCount, insiderPct, instPct, bullish, bearish,
+           total:sentiments.length, reason };
+}
+
+function calcFinal(results) {
+  // F7 score of 0 = not an AI stock = excluded
+  const active=Object.values(results).filter(r=>r&&r.score>0);
+  if (!active.length) return 0;
+  return parseFloat((active.reduce((s,r)=>s+r.score,0)/active.length).toFixed(1));
+}
+
+function verdict(s) {
+  if (s>=8.5) return {label:'STRONG BUY',color:'#22c55e',bg:'#22c55e12',emoji:'🚀'};
+  if (s>=7)   return {label:'BUY',        color:'#4ade80',bg:'#4ade8012',emoji:'✅'};
+  if (s>=5.5) return {label:'HOLD',       color:'#eab308',bg:'#eab30812',emoji:'⏸️'};
+  if (s>=4)   return {label:'REVIEW',     color:'#f97316',bg:'#f9731612',emoji:'⚠️'};
+  return             {label:'SELL',       color:'#ef4444',bg:'#ef444412',emoji:'🔴'};
+}
+
+function sc(s) {
+  if (!s||s===0) return '#475569';
+  if (s>=8) return '#22c55e'; if (s>=6) return '#3b82f6';
+  if (s>=4) return '#eab308'; return '#ef4444';
+}
+
+/* ═══════════════════════════════════════════
+   REDUCER
+═══════════════════════════════════════════ */
+const INIT={ticker:'',step:'home',results:null,error:null};
+
+function reducer(state,action) {
+  switch(action.type) {
+    case 'TICKER': return {...state,ticker:action.v.toUpperCase()};
+    case 'LOAD':   return {...state,step:'loading',error:null};
+    case 'DONE':   return {...state,step:'results',results:action.v};
+    case 'ERR':    return {...state,step:'error',error:action.v};
+    case 'RESET':  return INIT;
+    default: return state;
+  }
+}
+
+/* ═══════════════════════════════════════════
+   UI ATOMS
+═══════════════════════════════════════════ */
+function Ring({score,size=90,sw=9}) {
+  const r=(size-sw)/2,c=2*Math.PI*r;
+  const fill=Math.max(0,Math.min(10,score))/10*c;
+  const col=sc(score);
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{transform:'rotate(-90deg)'}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#1e293b" strokeWidth={sw}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={col} strokeWidth={sw}
+        strokeDasharray={`${fill} ${c}`} strokeLinecap="round"
+        style={{transition:'stroke-dasharray .6s ease'}}/>
+      <text x={size/2} y={size/2} textAnchor="middle" dominantBaseline="central"
+        fill={score===0?'#475569':col} fontSize={size/4} fontWeight="800"
+        style={{transform:`rotate(90deg)`,transformOrigin:`${size/2}px ${size/2}px`,fontFamily:'system-ui'}}>
+        {score===0?'—':score.toFixed(1)}
+      </text>
+    </svg>
+  );
+}
+
+function Bar({score,height=4}) {
+  return (
+    <div style={{background:'#0f172a',borderRadius:3,height,overflow:'hidden',marginBottom:8}}>
+      <div style={{height:'100%',borderRadius:3,width:`${(score/10)*100}%`,
+        background:sc(score),transition:'width .7s ease'}}/>
+    </div>
+  );
+}
+
+function MiniScore({score,label,emoji}) {
+  return (
+    <div style={{background:'#1e293b',borderRadius:12,padding:'10px 6px',textAlign:'center',
+      border:`1px solid ${score>0?sc(score)+'30':'#334155'}`}}>
+      <div style={{fontSize:18,marginBottom:3}}>{emoji}</div>
+      <div style={{fontSize:17,fontWeight:'800',color:sc(score)}}>{score===0?'—':score.toFixed(1)}</div>
+      <div style={{fontSize:9,color:'#64748b',marginTop:2,lineHeight:1.3}}>{label}</div>
+    </div>
+  );
+}
+
+function FilterCard({emoji,title,score,reason,badge,badgeColor,children}) {
+  return (
+    <div style={{background:'#1e293b',borderRadius:14,padding:15,marginBottom:10,border:'1px solid #334155'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+        <span style={{fontSize:15,fontWeight:'700'}}>{emoji} {title}</span>
+        <span style={{fontSize:15,fontWeight:'800',color:sc(score)}}>{score===0?'N/A':`${score.toFixed(1)}/10`}</span>
+      </div>
+      {badge&&<div style={{display:'inline-block',background:(badgeColor||'#3b82f6')+'22',
+        border:`1px solid ${badgeColor||'#3b82f6'}44`,borderRadius:5,padding:'2px 8px',
+        fontSize:11,fontWeight:'700',color:badgeColor||'#3b82f6',marginBottom:6}}>{badge}</div>}
+      <Bar score={score}/>
+      <p style={{fontSize:12,color:'#64748b',lineHeight:1.65}}>{reason}</p>
+      {children}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   SCREENS
+═══════════════════════════════════════════ */
+function HomeScreen({state,dispatch}) {
+  const {ticker}=state;
+
+  async function analyze() {
+    if (!ticker) return;
+    dispatch({type:'LOAD'});
+    try {
+      const {ov,inc,q,news,edgar}=await fetchAll(ticker);
+      const growths=[];
+      const reports=(inc.annualReports||[]).slice(0,6);
+      const revs=reports.map(r=>extractRevenue(r)).filter(v=>v!==null).reverse();
+      for (let i=1;i<revs.length;i++)
+        growths.push(((revs[i]-revs[i-1])/revs[i-1]*100).toFixed(1));
+      const reportedYears=reports.map(r=>r.fiscalDateEnding?.slice(0,4)||'').reverse();
+      const curPrice=parseFloat(q?.['Global Quote']?.['05. price']||0);
+      const changePct=parseFloat((q?.['Global Quote']?.['10. change percent']||'0').replace('%',''));
+      const mktCap=fmtM(ov.MarketCapitalization)||'—';
+      const wk52H=parseFloat(ov['52WeekHigh']||0);
+      const pctBelow=curPrice>0&&wk52H>0?Math.round((1-curPrice/wk52H)*100):null;
+      const instPct=pct(ov.PercentInstitutionalOwnership)||0;
+
+      const f1=scoreF1(growths);
+      const f2=scoreF2(ov,growths);
+      const f3=scoreF3(ov,growths);
+      const f4=scoreF4(ov,curPrice);
+      const f5=scoreF5(ov,growths);
+      const f6=scoreF6(ov);
+      const f7=scoreF7(ov,news,ov.Symbol||ticker);
+      const f8=scoreF8(ov,news,edgar);
+
+      dispatch({type:'DONE',v:{
+        name:ov.Name||ticker, symbol:ov.Symbol||ticker,
+        sector:ov.Sector||'', exchange:ov.Exchange||'',
+        description:(ov.Description||'').slice(0,400),
+        currency:'$', flag:'🇺🇸',
+        mktCap, curPrice, changePct,
+        wk52H, wk52L:parseFloat(ov['52WeekLow']||0),
+        pctBelow, instPct,
+        analystTarget:n(ov.AnalystTargetPrice),
+        growths, reportedYears,
+        f1,f2,f3,f4,f5,f6,f7,f8,
+      }});
+    } catch(e) { dispatch({type:'ERR',v:e.message}); }
+  }
+
+  return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',padding:'24px 20px',overflow:'auto'}}>
+      <div style={{textAlign:'center',marginBottom:26,paddingTop:8}}>
+        <div style={{fontSize:46,marginBottom:8}}>📊</div>
+        <h1 style={{fontSize:27,fontWeight:'800',letterSpacing:'-.5px'}}>🇺🇸 Stock Analyzer</h1>
+        <p style={{color:'#475569',fontSize:13,marginTop:4}}>
+          Enter a US ticker. We pull everything. Zero manual input.
+        </p>
+      </div>
+
+      <div style={{marginBottom:18}}>
+        <label style={{fontSize:11,color:'#64748b',fontWeight:'700',textTransform:'uppercase',
+          letterSpacing:'.6px',display:'block',marginBottom:6}}>
+          Ticker Symbol
+        </label>
+        <input type="text" value={ticker}
+          placeholder="e.g.  AAPL   NVDA   INTC   PLTR   TSLA"
+          onChange={e=>dispatch({type:'TICKER',v:e.target.value})}
+          onKeyDown={e=>e.key==='Enter'&&analyze()}
+          style={{fontSize:22,fontWeight:'800',letterSpacing:'.5px',padding:'14px 16px',textTransform:'uppercase'}}/>
+      </div>
+
+      <button onClick={analyze} disabled={!ticker}
+        style={{borderRadius:14,padding:'16px',fontSize:16,fontWeight:'700',marginBottom:14,
+          background:ticker?'#3b82f6':'#1e293b',
+          color:ticker?'#fff':'#475569',transition:'all .2s'}}>
+        {ticker?`Analyze ${ticker} →`:'Enter a ticker symbol to begin'}
+      </button>
+
+      {ticker&&getCache(ticker,'yf')&&(
+        <div style={{fontSize:11,color:'#64748b',textAlign:'center',marginBottom:10,
+          background:'#1e293b',borderRadius:8,padding:'6px 12px',border:'1px solid #334155'}}>
+          ⚡ Cached — instant results
+          <button onClick={()=>{
+            try{localStorage.removeItem(`sa_yf_${ticker}`);}catch(e){}
+            dispatch({type:'TICKER',v:ticker});
+          }} style={{marginLeft:8,color:'#475569',background:'none',fontSize:11,textDecoration:'underline'}}>
+            force refresh
+          </button>
+        </div>
+      )}
+
+      <div style={{background:'#1e293b',borderRadius:12,padding:14,border:'1px solid #334155'}}>
+        <div style={{fontSize:11,color:'#3b82f6',fontWeight:'700',textTransform:'uppercase',
+          letterSpacing:'.5px',marginBottom:10}}>✨ Completely free · No API key · No sign-up</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+          {[['📈','Revenue Growth','5-year trend'],['🏰','Competitive Moat','Margins + beta'],
+            ['🧭','Leadership','Insider % + ROE'],['⏱️','Market Timing','52-wk + targets'],
+            ['🛡️','Risk','Beta + stability'],['💰','Valuation','P/E vs sector/index'],
+            ['🤖','AI Advantage','Description + news'],['🐋','Whale Activity','News + insiders'],
+          ].map(([e,t,d])=>(
+            <div key={t} style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{fontSize:16,flexShrink:0}}>{e}</span>
+              <div>
+                <div style={{fontSize:12,fontWeight:'600',color:'#cbd5e1'}}>{t}</div>
+                <div style={{fontSize:11,color:'#64748b'}}>{d}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoadingScreen({ticker}) {
+  const [phase,setPhase]=useState(0);
+  const phases=['Fetching company overview…','Loading 5-year revenue history…','Pulling price & analyst data…','Scanning news for whale activity…','Running AI advantage detection…','Calculating all 8 scores…'];
+  useEffect(()=>{
+    const t=setInterval(()=>setPhase(p=>(p+1)%phases.length),900);
+    return ()=>clearInterval(t);
+  },[]);
+  return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',
+      justifyContent:'center',padding:40,gap:24}}>
+      <div style={{width:60,height:60,border:'3px solid #1e293b',borderTopColor:'#3b82f6',
+        borderRadius:'50%',animation:'spin 1s linear infinite'}}/>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontSize:20,fontWeight:'800',marginBottom:8}}>Analyzing {ticker}</div>
+        <div style={{fontSize:13,color:'#64748b',height:20}}>{phases[phase]}</div>
+      </div>
+      <div style={{display:'flex',gap:6}}>
+        {phases.map((_,i)=>(
+          <div key={i} style={{width:6,height:6,borderRadius:'50%',transition:'all .3s',
+            background:i<=phase?'#3b82f6':'#1e293b'}}/>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ErrorScreen({message,dispatch}) {
+  const isDaily=message?.includes('Daily') || message?.includes('midnight');
+  return (
+    <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',
+      justifyContent:'center',padding:40,gap:20,textAlign:'center'}}>
+      <div style={{fontSize:48}}>{isDaily?'📅':'⚠️'}</div>
+      <h2 style={{fontSize:20,fontWeight:'800'}}>{isDaily?'Daily Limit Reached':'Something went wrong'}</h2>
+      <p style={{fontSize:14,color:'#94a3b8',lineHeight:1.65,maxWidth:320,whiteSpace:'pre-line'}}>{message}</p>
+      {isDaily&&(
+        <a href="https://www.alphavantage.co/premium/" target="_blank"
+          style={{background:'#eab308',color:'#000',borderRadius:12,padding:'12px 24px',
+            fontSize:14,fontWeight:'700',textDecoration:'none'}}>
+          Upgrade for unlimited calls →
+        </a>
+      )}
+      <button onClick={()=>dispatch({type:'RESET'})}
+        style={{background:isDaily?'#334155':'#3b82f6',color:'#fff',borderRadius:12,padding:'13px 28px',
+          fontSize:15,fontWeight:'700'}}>← Back</button>
+    </div>
+  );
+}
+
+function ResultsScreen({state,dispatch}) {
+  const d=state.results;
+  if (!d) return null;
+  const {f1,f2,f3,f4,f5,f6,f7,f8}=d;
+  const final=calcFinal({f1,f2,f3,f4,f5,f6,f7,f8});
+  const vrd=verdict(final);
+
+  const changeCol=d.changePct>=0?'#22c55e':'#ef4444';
+  const aiLevelLabel=f7.level==='leader'?'AI LEADER 🏆':f7.level==='strong'?'AI STRONG':f7.level==='participant'?'AI PARTICIPANT':f7.level==='adjacent'?'AI ADJACENT':null;
+  const aiColor=f7.level==='leader'?'#22c55e':f7.level==='strong'?'#4ade80':f7.level==='participant'?'#3b82f6':f7.level==='adjacent'?'#eab308':'#475569';
+  const whaleCount=f8.detected?.length||0;
+
+  return (
+    <div style={{flex:1,overflowY:'auto',padding:'20px 20px 40px'}}>
+      {/* Company header */}
+      <div style={{textAlign:'center',marginBottom:18,paddingTop:4}}>
+        <div style={{fontSize:11,color:'#64748b',marginBottom:3}}>{d.flag} {d.sector} · {d.exchange}</div>
+        <h2 style={{fontSize:23,fontWeight:'800',letterSpacing:'-.3px'}}>{d.name}</h2>
+        <div style={{display:'flex',justifyContent:'center',alignItems:'center',gap:10,marginTop:4,flexWrap:'wrap'}}>
+          <span style={{fontSize:13,color:'#3b82f6',fontWeight:'700'}}>{d.symbol}</span>
+          {d.curPrice>0&&<span style={{fontSize:15,fontWeight:'800'}}>{d.currency}{d.curPrice.toFixed(2)}</span>}
+          {d.changePct!==undefined&&<span style={{fontSize:13,fontWeight:'700',color:changeCol}}>
+            {d.changePct>=0?'+':''}{d.changePct.toFixed(2)}%
+          </span>}
+          {d.mktCap&&<span style={{fontSize:12,color:'#475569'}}>Mkt {d.mktCap}</span>}
+        </div>
+        {d.pctBelow!==null&&d.pctBelow>0&&(
+          <div style={{fontSize:12,color:d.pctBelow>=25?'#22c55e':'#eab308',marginTop:4,fontWeight:'600'}}>
+            📉 {d.pctBelow}% below 52-wk high of {d.currency}{d.wk52H.toFixed(2)}
+          </div>
+        )}
+      </div>
+
+      {/* Verdict */}
+      <div style={{background:'linear-gradient(135deg,#1e293b,#0f172a)',
+        border:`2px solid ${vrd.color}30`,borderRadius:22,padding:22,textAlign:'center',
+        marginBottom:20,position:'relative',overflow:'hidden'}}>
+        <div style={{position:'absolute',top:0,left:0,right:0,height:3,
+          background:`linear-gradient(90deg,transparent,${vrd.color},transparent)`}}/>
+        <Ring score={final} size={110} sw={10}/>
+        <div style={{marginTop:10}}>
+          <div style={{display:'inline-block',background:vrd.bg,border:`1px solid ${vrd.color}50`,
+            borderRadius:9,padding:'5px 18px',fontSize:14,fontWeight:'800',color:vrd.color,
+            letterSpacing:'1.5px',marginBottom:4}}>
+            {vrd.emoji} {vrd.label}
+          </div>
+          <div style={{fontSize:11,color:'#475569'}}>Average of {Object.values({f1,f2,f3,f4,f5,f6,f7,f8}).filter(r=>r.score>0).length} scored filters</div>
+        </div>
+
+        {/* Alert badges */}
+        {(f7.level==='leader'||whaleCount>0)&&(
+          <div style={{display:'flex',gap:8,justifyContent:'center',marginTop:10,flexWrap:'wrap'}}>
+            {f7.level==='leader'&&(
+              <span style={{background:'#22c55e20',border:'1px solid #22c55e40',borderRadius:7,
+                padding:'3px 10px',fontSize:11,fontWeight:'700',color:'#22c55e'}}>
+                🤖 AI LEADER — MOAT DETECTED
+              </span>
+            )}
+            {whaleCount>0&&(
+              <span style={{background:'#3b82f620',border:'1px solid #3b82f640',borderRadius:7,
+                padding:'3px 10px',fontSize:11,fontWeight:'700',color:'#3b82f6'}}>
+                🐋 {whaleCount} WHALE{whaleCount>1?'S':''} DETECTED
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 8-filter mini grid */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:18}}>
+        {[{e:'📈',l:'Revenue',r:f1},{e:'🏰',l:'Moat',r:f2},{e:'🧭',l:'Leadership',r:f3},
+          {e:'⏱️',l:'Timing',r:f4},{e:'🛡️',l:'Risk',r:f5},{e:'💰',l:'Valuation',r:f6},
+          {e:'🤖',l:'AI Edge',r:f7},{e:'🐋',l:'Whales',r:f8}
+        ].map(({e,l,r})=><MiniScore key={l} score={r.score} label={l} emoji={e}/>)}
+      </div>
+
+      {/* Revenue year strip */}
+      {d.growths?.length>0&&(
+        <div style={{background:'#1e293b',borderRadius:12,padding:'12px 14px',marginBottom:14,
+          border:'1px solid #334155'}}>
+          <div style={{fontSize:11,color:'#3b82f6',fontWeight:'700',textTransform:'uppercase',
+            letterSpacing:'.5px',marginBottom:8}}>Revenue Growth — Year by Year</div>
+          <div style={{display:'flex',gap:4}}>
+            {d.growths.map((g,i)=>{
+              const v=parseFloat(g);
+              const col=v>=20?'#22c55e':v>=10?'#3b82f6':v>=0?'#eab308':'#ef4444';
+              return (
+                <div key={i} style={{flex:1,textAlign:'center',background:'#0f172a',borderRadius:8,padding:'8px 4px'}}>
+                  <div style={{fontSize:12,fontWeight:'800',color:col}}>{v>0?'+':''}{g}%</div>
+                  {d.reportedYears?.[i+1]&&<div style={{fontSize:9,color:'#475569',marginTop:2}}>{d.reportedYears[i+1]}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── FILTER CARDS ── */}
+      <div style={{fontSize:11,color:'#64748b',fontWeight:'700',textTransform:'uppercase',
+        letterSpacing:'.6px',marginBottom:12}}>Detailed Breakdown</div>
+
+      <FilterCard emoji="📈" title="Revenue Growth" score={f1.score} reason={f1.reason}/>
+      <FilterCard emoji="🏰" title="Competitive Position" score={f2.score} reason={f2.reason}/>
+      <FilterCard emoji="🧭" title="Leadership & Integrity" score={f3.score} reason={f3.reason}/>
+      <FilterCard emoji="⏱️" title="Market Timing" score={f4.score} reason={f4.reason}>
+        {d.analystTarget&&d.curPrice>0&&(
+          <div style={{marginTop:8,background:'#0f172a',borderRadius:8,padding:'8px 10px',
+            display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:12,color:'#64748b'}}>Analyst 12-month target</span>
+            <span style={{fontSize:14,fontWeight:'800',color:'#3b82f6'}}>
+              {d.currency}{d.analystTarget.toFixed(2)}
+              <span style={{fontSize:11,fontWeight:'600',color:'#64748b',marginLeft:6}}>
+                ({((d.analystTarget/d.curPrice-1)*100).toFixed(0)}% upside)
+              </span>
+            </span>
+          </div>
+        )}
+      </FilterCard>
+      <FilterCard emoji="🛡️" title="Risk Assessment" score={f5.score} reason={f5.reason}/>
+      <FilterCard emoji="💰" title="Valuation" score={f6.score} reason={f6.reason}/>
+
+      {/* AI Advantage card */}
+      <FilterCard emoji="🤖" title="AI Advantage" score={f7.score} reason={f7.reason}
+        badge={aiLevelLabel} badgeColor={aiColor}>
+        {f7.score===0&&(
+          <div style={{marginTop:6,fontSize:12,color:'#475569',fontStyle:'italic'}}>
+            Score excluded from final average — not applicable for non-AI businesses.
+          </div>
+        )}
+      </FilterCard>
+
+      {/* Whale / Insider card */}
+      <FilterCard emoji="🐋" title="Whale & Insider Activity" score={f8.score} reason={f8.reason}>
+        {f8.detected?.length>0&&(
+          <div style={{marginTop:10,display:'flex',flexDirection:'column',gap:6}}>
+            {f8.detected.map((w,i)=>(
+              <div key={i} style={{display:'flex',alignItems:'flex-start',gap:10,padding:'8px 10px',
+                background:w.buying?'#22c55e15':w.selling?'#ef444415':'#3b82f615',
+                borderRadius:8,border:`1px solid ${w.buying?'#22c55e30':w.selling?'#ef444430':'#3b82f630'}`}}>
+                <span style={{fontSize:20,flexShrink:0}}>{w.icon}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:'700'}}>{w.name}</div>
+                  <div style={{fontSize:11,color:w.buying?'#22c55e':w.selling?'#ef4444':'#94a3b8',fontWeight:'600'}}>
+                    {w.buying?'📈 Buying activity detected':w.selling?'📉 Selling activity detected':'👀 Mentioned in news'}
+                  </div>
+                  {w.headline&&<div style={{fontSize:10,color:'#475569',marginTop:3,lineHeight:1.4,
+                    overflow:'hidden',textOverflow:'ellipsis',display:'-webkit-box',
+                    WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>"{w.headline}"</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {f8.recentInsiderCount>0&&(
+          <div style={{marginTop:8,background:'#0f172a',borderRadius:8,padding:'8px 10px',
+            border:'1px solid #1e40af30'}}>
+            <div style={{fontSize:11,color:'#3b82f6',fontWeight:'700',marginBottom:3}}>
+              📋 SEC Form 4 — {f8.recentInsiderCount} insider filing{f8.recentInsiderCount>1?'s':''} in last 6 months
+            </div>
+            {f8.insiderNames?.length>0&&(
+              <div style={{fontSize:11,color:'#64748b'}}>Filers: {f8.insiderNames.join(' · ')}</div>
+            )}
+          </div>
+        )}
+        <div style={{marginTop:8,display:'flex',gap:8}}>
+          {[['🟢 Bullish',f8.bullish,'#22c55e'],['🔴 Bearish',f8.bearish,'#ef4444'],
+            ['📰 Total news',f8.total,'#3b82f6']].map(([lbl,v,col])=>(
+            <div key={lbl} style={{flex:1,background:'#0f172a',borderRadius:8,padding:'7px 8px',textAlign:'center',
+              border:`1px solid ${col}20`}}>
+              <div style={{fontSize:14,fontWeight:'800',color:col}}>{v}</div>
+              <div style={{fontSize:10,color:'#475569',marginTop:1}}>{lbl.split(' ').slice(1).join(' ')}</div>
+            </div>
+          ))}
+        </div>
+      </FilterCard>
+
+      <div style={{background:'#1e293b',borderRadius:11,padding:12,marginBottom:14,border:'1px solid #334155'}}>
+        <p style={{fontSize:11,color:'#475569',lineHeight:1.6,textAlign:'center'}}>
+          ⚠️ For educational purposes only. Not financial advice. Always do your own research.
+        </p>
+      </div>
+
+      <button onClick={()=>dispatch({type:'RESET'})}
+        style={{width:'100%',background:'#3b82f6',color:'#fff',borderRadius:12,padding:14,
+          fontSize:15,fontWeight:'700'}}>
+        ← Analyze Another Stock
+      </button>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   APP
+═══════════════════════════════════════════ */
+function App() {
+  const [state,dispatch]=useReducer(reducer,INIT);
+  const {step,ticker,results}=state;
+  const isResult=step==='results';
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',minHeight:'100vh',background:'#0f172a'}}>
+      {isResult&&(
+        <div style={{display:'flex',alignItems:'center',padding:'11px 20px',
+          background:'#0a1122',borderBottom:'1px solid #1e293b',flexShrink:0}}>
+          <button onClick={()=>dispatch({type:'RESET'})}
+            style={{background:'none',color:'#64748b',fontSize:20,padding:'2px 10px 2px 0'}}>‹</button>
+          <div>
+            <div style={{fontSize:13,fontWeight:'700'}}>
+              {results?.name||ticker}
+              {results?.symbol&&<span style={{color:'#3b82f6',marginLeft:8,fontSize:12}}>{results.symbol}</span>}
+            </div>
+            <div style={{fontSize:11,color:'#64748b'}}>Analysis complete · 8 filters</div>
+          </div>
+        </div>
+      )}
+      {step==='home'    && <HomeScreen    state={state} dispatch={dispatch}/>}
+      {step==='loading' && <LoadingScreen ticker={ticker}/>}
+      {step==='error'   && <ErrorScreen   message={state.error} dispatch={dispatch}/>}
+      {step==='results' && <ResultsScreen state={state} dispatch={dispatch}/>}
+    </div>
+  );
+}
+
+ReactDOM.render(<App/>, document.getElementById('root'));
+</script></body></html>
