@@ -269,117 +269,164 @@ function getSectorPe(industry) {
   return 22;
 }
 
-/* ── Scoring functions ─────────────────────────────────────────────── */
+/* ── Scoring functions — original 8 filters ─────────────────────── */
 
-function scoreF1(profile, metric) {
+// F1: Revenue Growth (YoY + trend)
+function scoreF1(metric) {
   const m = metric?.metric || {};
-  const pe = m.peTTM || m.peNormalizedAnnual || m.peExclExtraTTM;
-  if (!pe || pe<=0 || pe>500) return {score:1,label:'Valuation (P/E)',detail:'P/E not available',color:'#64748b'};
-  const spe = getSectorPe(profile.finnhubIndustry);
-  const ratio = pe/spe;
-  let score, detail;
-  if      (ratio<0.6)  {score=5; detail=`P/E ${pe.toFixed(1)} — deeply undervalued vs sector (${spe})`;}
-  else if (ratio<0.85) {score=4; detail=`P/E ${pe.toFixed(1)} — below sector avg (${spe})`;}
-  else if (ratio<1.15) {score=3; detail=`P/E ${pe.toFixed(1)} — fairly valued vs sector (${spe})`;}
-  else if (ratio<1.5)  {score=2; detail=`P/E ${pe.toFixed(1)} — somewhat expensive vs sector (${spe})`;}
-  else                 {score=1; detail=`P/E ${pe.toFixed(1)} — expensive vs sector avg (${spe})`;}
-  return {score,label:'Valuation (P/E)',detail,color:barColor(score)};
-}
-
-function scoreF2(metric) {
-  const m = metric?.metric || {};
-  // revenueGrowthTTMYoy is already a percentage (e.g. 8.5 = 8.5%)
-  const pct = m.revenueGrowthTTMYoy ?? m.revenueGrowthAnnual ?? m.salesGrowthTTMYoy;
+  const yoy = m.revenueGrowthTTMYoy ?? m.salesGrowthTTMYoy;
+  const g3y = m.revenueGrowth3Y ?? m.revenueGrowthAnnual;
+  const pct = yoy ?? g3y;
   if (pct==null) return {score:2,label:'Revenue Growth',detail:'Revenue data not available',color:'#64748b'};
+  const trend = (yoy!=null&&g3y!=null) ? (yoy>g3y+5?' (accelerating 🚀)':yoy<g3y-5?' (decelerating ⚠️)':'') : '';
   let score, detail;
-  if      (pct>=20) {score=5; detail=`Revenue +${pct.toFixed(1)}% YoY — strong growth`;}
-  else if (pct>=10) {score=4; detail=`Revenue +${pct.toFixed(1)}% YoY — solid growth`;}
-  else if (pct>=0)  {score=3; detail=`Revenue +${pct.toFixed(1)}% YoY — modest growth`;}
-  else if (pct>=-10){score=2; detail=`Revenue ${pct.toFixed(1)}% YoY — slight decline`;}
-  else              {score=1; detail=`Revenue ${pct.toFixed(1)}% YoY — significant decline`;}
+  if      (pct>=25) {score=5; detail=`Revenue +${pct.toFixed(1)}% YoY — exceptional${trend}`;}
+  else if (pct>=12) {score=4; detail=`Revenue +${pct.toFixed(1)}% YoY — solid growth${trend}`;}
+  else if (pct>=0)  {score=3; detail=`Revenue +${pct.toFixed(1)}% YoY — modest growth${trend}`;}
+  else if (pct>=-10){score=2; detail=`Revenue ${pct.toFixed(1)}% YoY — slight decline${trend}`;}
+  else              {score=1; detail=`Revenue ${pct.toFixed(1)}% YoY — significant decline${trend}`;}
   return {score,label:'Revenue Growth',detail,color:barColor(score)};
 }
 
+// F2: Margin Quality (gross margin + operating margin = pricing power & efficiency)
+function scoreF2(metric) {
+  const m = metric?.metric || {};
+  let gm = m.grossMarginTTM ?? m.grossMargin ?? m.grossProfitMarginTTM;
+  let om = m.operatingMarginTTM ?? m.operatingMargin ?? m.ebitdaMarginTTM;
+  if (gm==null && om==null) return {score:2,label:'Margin Quality',detail:'Margin data not available',color:'#64748b'};
+  if (gm!=null && Math.abs(gm)<=1) gm*=100;
+  if (om!=null && Math.abs(om)<=1) om*=100;
+  let pts=0, max=0, parts=[];
+  if (gm!=null) {
+    max+=2; pts+=gm>=70?2:gm>=50?1.5:gm>=30?1:gm>=0?0.5:0;
+    parts.push(`Gross margin ${gm.toFixed(0)}%${gm>=70?' (elite ✓)':gm>=50?' (strong ✓)':gm>=30?' (moderate)':' (thin)'}`);
+  }
+  if (om!=null) {
+    max+=3; pts+=om>=25?3:om>=15?2.5:om>=5?2:om>0?1:0;
+    parts.push(`Op margin ${om.toFixed(0)}%${om>=25?' (highly efficient ✓)':om>=15?' (efficient ✓)':om>0?' (positive)':' (loss-making ⚠️)'}`);
+  }
+  const score = max>0?Math.max(1,Math.min(5,Math.round(pts/max*5))):2;
+  return {score,label:'Margin Quality',detail:parts.join('. '),color:barColor(score)};
+}
+
+// F3: Financial Strength (ROE + Debt/Equity)
 function scoreF3(metric) {
   const m = metric?.metric || {};
-  let margin = m.netProfitMarginTTM ?? m.netProfitMarginAnnual ?? m.netMarginTTM;
-  if (margin==null) return {score:2,label:'Profit Margin',detail:'Data not available',color:'#64748b'};
-  // Finnhub returns as decimal (0.25 = 25%) or percent — normalise
-  if (Math.abs(margin)<=1) margin*=100;
-  let score, detail;
-  if      (margin>=25) {score=5; detail=`Net margin ${margin.toFixed(1)}% — excellent`;}
-  else if (margin>=15) {score=4; detail=`Net margin ${margin.toFixed(1)}% — strong`;}
-  else if (margin>=5)  {score=3; detail=`Net margin ${margin.toFixed(1)}% — moderate`;}
-  else if (margin>=0)  {score=2; detail=`Net margin ${margin.toFixed(1)}% — thin`;}
-  else                 {score=1; detail=`Net margin ${margin.toFixed(1)}% — unprofitable`;}
-  return {score,label:'Profit Margin',detail,color:barColor(score)};
+  let roe = m.roeTTM ?? m.roeRfy ?? m.roeAnnual;
+  const raw = m['totalDebt/totalEquityAnnual'] ?? m['totalDebt/totalEquityQuarterly'];
+  if (roe==null && raw==null) return {score:2,label:'Financial Strength',detail:'Data not available',color:'#64748b'};
+  if (roe!=null && Math.abs(roe)<=1) roe*=100;
+  const de = raw!=null?(raw>10?raw/100:raw):null;
+  let pts=0, max=0, parts=[];
+  if (roe!=null) {
+    max+=5; pts+=roe>=25?5:roe>=15?4:roe>=8?3:roe>=0?2:1;
+    parts.push(`ROE ${roe.toFixed(1)}%${roe>=25?' (exceptional ✓)':roe>=15?' (above avg ✓)':roe>=8?' (decent)':' (weak)'}`);
+  }
+  if (de!=null) {
+    max+=5; pts+=de<0.3?5:de<0.8?4:de<1.5?3:de<3?2:1;
+    parts.push(`D/E ${de.toFixed(2)}${de<0.3?' (very low debt ✓)':de<0.8?' (manageable ✓)':de<1.5?' (moderate)':' (high leverage ⚠️)'}`);
+  }
+  const score = max>0?Math.max(1,Math.min(5,Math.round(pts/max*5))):2;
+  return {score,label:'Financial Strength',detail:parts.join('. '),color:barColor(score)};
 }
 
-function scoreF4(metric) {
+// F4: Price Timing (52-week range + analyst target)
+function scoreF4(quote, metric, priceTarget) {
   const m = metric?.metric || {};
-  // Finnhub: totalDebt/totalEquityAnnual is in % (150 = D/E of 1.5)
-  const raw = m['totalDebt/totalEquityAnnual'] ?? m['totalDebt/totalEquityQuarterly'] ?? m.debtEquityRatio;
-  if (raw==null||raw<0) return {score:3,label:'Debt / Equity',detail:'Debt data not available',color:'#64748b'};
-  const de = raw>10 ? raw/100 : raw; // normalise
-  let score, detail;
-  if      (de<0.3)  {score=5; detail=`D/E ${de.toFixed(2)} — very low debt`;}
-  else if (de<0.8)  {score=4; detail=`D/E ${de.toFixed(2)} — manageable debt`;}
-  else if (de<1.5)  {score=3; detail=`D/E ${de.toFixed(2)} — moderate leverage`;}
-  else if (de<3.0)  {score=2; detail=`D/E ${de.toFixed(2)} — high leverage`;}
-  else              {score=1; detail=`D/E ${de.toFixed(2)} — dangerously leveraged`;}
-  return {score,label:'Debt / Equity',detail,color:barColor(score)};
+  const hi=m['52WeekHigh'], lo=m['52WeekLow'], cur=quote.c;
+  if (!hi||!lo||!cur||hi<=lo) return {score:3,label:'Price Timing',detail:'Price data not available',color:'#64748b'};
+  const pos=(cur-lo)/(hi-lo);
+  let score;
+  if      (pos<0.20) score=5;
+  else if (pos<0.40) score=4;
+  else if (pos<0.65) score=3;
+  else if (pos<0.85) score=2;
+  else               score=1;
+  let detail = `${(pos*100).toFixed(0)}% of 52-wk range ($${lo.toFixed(0)}–$${hi.toFixed(0)})`;
+  const target = priceTarget?.targetMean || priceTarget?.targetMedian;
+  if (target && cur>0) {
+    const upside=(target-cur)/cur*100;
+    if (upside>20) { detail+=`. Analyst target $${target.toFixed(0)} (+${upside.toFixed(0)}% upside ✓)`; if(score<5) score=Math.min(score+1,5); }
+    else if (upside>5) detail+=`. Analyst target $${target.toFixed(0)} (+${upside.toFixed(0)}%)`;
+    else if (upside<-10){ detail+=`. Analyst target $${target.toFixed(0)} (downside risk ⚠️)`; if(score>1) score=Math.max(score-1,1); }
+  }
+  return {score,label:'Price Timing',detail,color:barColor(score)};
 }
 
+// F5: Risk Profile (beta + net margin stability)
 function scoreF5(metric) {
   const m = metric?.metric || {};
-  let roe = m.roeTTM ?? m.roeRfy ?? m.roeAnnual;
-  if (roe==null) return {score:2,label:'Return on Equity',detail:'ROE not available',color:'#64748b'};
-  if (Math.abs(roe)<=1) roe*=100; // normalise
-  let score, detail;
-  if      (roe>=25) {score=5; detail=`ROE ${roe.toFixed(1)}% — exceptional`;}
-  else if (roe>=15) {score=4; detail=`ROE ${roe.toFixed(1)}% — above average`;}
-  else if (roe>=8)  {score=3; detail=`ROE ${roe.toFixed(1)}% — decent`;}
-  else if (roe>=0)  {score=2; detail=`ROE ${roe.toFixed(1)}% — below average`;}
-  else              {score=1; detail=`ROE ${roe.toFixed(1)}% — negative`;}
-  return {score,label:'Return on Equity',detail,color:barColor(score)};
-}
-
-function scoreF6(profile, quote, metric) {
-  const m = metric?.metric || {};
-  const hi  = m['52WeekHigh'];
-  const lo  = m['52WeekLow'];
-  const cur = quote.c;
-  if (!hi||!lo||!cur||hi<=lo) return {score:3,label:'Price vs 52-Week Range',detail:'Price data not available',color:'#64748b'};
-  const pos = (cur-lo)/(hi-lo);
-  let score, detail;
-  if      (pos<0.20) {score=5; detail:`Near 52-wk low (${(pos*100).toFixed(0)}% of range) — potential opportunity`;}
-  else if (pos<0.40) {score=4; detail:`Low in range (${(pos*100).toFixed(0)}%) — room to run`;}
-  else if (pos<0.65) {score=3; detail:`Mid-range (${(pos*100).toFixed(0)}%) — neutral`;}
-  else if (pos<0.85) {score=2; detail:`High in range (${(pos*100).toFixed(0)}%) — somewhat stretched`;}
-  else               {score=1; detail:`Near 52-wk high (${(pos*100).toFixed(0)}%) — extended`;}
-  const sym = (profile.ticker||'').toUpperCase();
-  if (AI_LEADERS.has(sym) && score<3) score = Math.min(score+1,5);
-  return {score,label:'Price vs 52-Week Range',detail,color:barColor(score)};
-}
-
-function scoreF7(news) {
-  if (!news||news.length===0) return {score:3,label:'News Sentiment',detail:'No recent news',color:'#64748b'};
-  let pos=0, neg=0;
-  for (const a of news.slice(0,30)) {
-    const txt = ((a.headline||'')+(a.summary||'')).toLowerCase();
-    if (POS_NEWS.some(w=>txt.includes(w))) pos++;
-    if (NEG_NEWS.some(w=>txt.includes(w))) neg++;
+  const beta = m.beta;
+  let npm = m.netProfitMarginTTM ?? m.netProfitMarginAnnual ?? m.netMarginTTM;
+  if (beta==null && npm==null) return {score:3,label:'Risk Profile',detail:'Risk data not available',color:'#64748b'};
+  if (npm!=null && Math.abs(npm)<=1) npm*=100;
+  let pts=0, max=0, parts=[];
+  if (beta!=null) {
+    max+=5; pts+=beta<0.5?5:beta<0.8?4:beta<1.2?3:beta<1.8?2:1;
+    parts.push(`Beta ${beta.toFixed(2)}${beta<0.8?' (low volatility ✓)':beta<1.2?' (market-like)':beta<1.8?' (volatile)':' (very volatile ⚠️)'}`);
   }
-  const total = pos+neg;
-  if (total===0) return {score:3,label:'News Sentiment',detail:'Mixed / neutral news',color:'#fde047'};
-  const ratio = pos/total;
+  if (npm!=null) {
+    max+=5; pts+=npm>=20?5:npm>=10?4:npm>=3?3:npm>=0?2:1;
+    parts.push(`Net margin ${npm.toFixed(1)}%${npm>=20?' (excellent ✓)':npm>=10?' (healthy ✓)':npm>=3?' (thin)':' (unprofitable ⚠️)'}`);
+  }
+  const score=max>0?Math.max(1,Math.min(5,Math.round(pts/max*5))):3;
+  return {score,label:'Risk Profile',detail:parts.join('. '),color:barColor(score)};
+}
+
+// F6: Valuation (P/E vs sector benchmark)
+function scoreF6(profile, metric) {
+  const m = metric?.metric || {};
+  const pe = m.peTTM || m.peNormalizedAnnual || m.peExclExtraTTM;
+  if (!pe||pe<=0||pe>600) return {score:2,label:'Valuation',detail:'P/E not available',color:'#64748b'};
+  const spe = getSectorPe(profile.finnhubIndustry);
+  const ratio = pe/spe;
   let score, detail;
-  if      (ratio>=0.75){score=5; detail=`${Math.round(ratio*100)}% positive headlines`;}
-  else if (ratio>=0.55){score=4; detail=`Mostly positive news (${Math.round(ratio*100)}%)`;}
-  else if (ratio>=0.40){score=3; detail:`Mixed news (${Math.round(ratio*100)}% positive)`;}
-  else if (ratio>=0.25){score=2; detail:`Mostly negative news (${Math.round((1-ratio)*100)}% negative)`;}
-  else                 {score=1; detail:`${Math.round((1-ratio)*100)}% negative headlines`;}
-  return {score,label:'News Sentiment',detail,color:barColor(score)};
+  if      (ratio<0.6)  {score=5; detail=`P/E ${pe.toFixed(1)} — deeply undervalued vs sector avg (${spe})`;}
+  else if (ratio<0.85) {score=4; detail=`P/E ${pe.toFixed(1)} — below sector avg (${spe}) — attractive`;}
+  else if (ratio<1.15) {score=3; detail=`P/E ${pe.toFixed(1)} — fairly valued vs sector (${spe})`;}
+  else if (ratio<1.5)  {score=2; detail=`P/E ${pe.toFixed(1)} — pricey vs sector (${spe})`;}
+  else                 {score=1; detail=`P/E ${pe.toFixed(1)} — expensive vs sector avg (${spe})`;}
+  const pb = m.pbAnnual ?? m.priceToBookTTM;
+  if (pb!=null) detail += `. P/B ${pb.toFixed(1)}`;
+  return {score,label:'Valuation',detail,color:barColor(score)};
+}
+
+// F7: AI Advantage — score null for non-AI stocks (excluded from avg, not penalised)
+function scoreF7(profile, news) {
+  const sym = (profile.ticker||'').toUpperCase();
+  const industry = (profile.finnhubIndustry||'').toLowerCase();
+
+  if (AI_LEADERS.has(sym)) {
+    const reasons = {
+      NVDA:'NVIDIA dominates AI compute — backbone of the entire AI industry',
+      MSFT:'Microsoft leads enterprise AI via OpenAI partnership + Azure AI',
+      GOOGL:'Google/Alphabet built Gemini, dominates AI search + cloud AI',
+      GOOG:'Google/Alphabet built Gemini, dominates AI search + cloud AI',
+      META:'Meta leads social AI + open-source LLaMA models for developers',
+      AMZN:'Amazon AWS leads AI cloud + Alexa + Bedrock AI platform',
+      PLTR:'Palantir is the pure-play AI/data analytics platform for enterprise',
+      AMD:'AMD competes in AI chips with MI300 GPUs — strong infrastructure play',
+      ORCL:'Oracle rapidly expanding AI cloud with NVIDIA partnerships',
+      IBM:'IBM Watson AI + enterprise AI consulting leadership',
+      TSLA:'Tesla FSD autonomous driving — massive real-world AI data moat',
+      SNOW:'Snowflake powers AI/ML workloads on its data cloud platform',
+    };
+    return {score:5, label:'🤖 AI Advantage', detail:reasons[sym]||`${sym} is a recognised AI leader with a strong competitive moat`, level:'leader', color:'#4ade80'};
+  }
+
+  const newsText = (Array.isArray(news)?news:[]).slice(0,25)
+    .map(a=>((a.headline||'')+(a.summary||'')).toLowerCase()).join(' ');
+  const aiTerms = ['artificial intelligence','machine learning',' ai ','generative ai','llm','large language','neural network','deep learning','chatgpt','copilot','gemini','gpt-'];
+  const isTechSector = ['technology','software','semiconductor','internet','cloud','data','cybersecurity'].some(t=>industry.includes(t));
+  const hasAInews = aiTerms.some(t=>newsText.includes(t));
+
+  if (isTechSector && hasAInews)
+    return {score:3, label:'🤖 AI Advantage', detail:`AI initiatives detected in news. Operates in ${profile.finnhubIndustry||'tech'} — AI-adjacent sector`, level:'participant', color:'#fde047'};
+  if (isTechSector)
+    return {score:2, label:'🤖 AI Advantage', detail:`Technology sector — potential AI beneficiary but no specific AI moat detected`, level:'participant', color:'#64748b'};
+
+  // Not an AI company → excluded from final average
+  return {score:null, label:'🤖 AI Advantage', detail:`Traditional business — AI not applicable. Score excluded from average.`, level:'none', color:'#475569'};
 }
 
 function scoreF8(profile, news, insider) {
@@ -443,19 +490,21 @@ async function analyze(ticker, apiKey) {
   let div = m.dividendYieldIndicatedAnnual || 0;
   if (div>0 && div<0.5) div*=100; // normalise decimal → %
 
-  const f1 = scoreF1(profile, metric);
+  const f1 = scoreF1(metric);
   const f2 = scoreF2(metric);
   const f3 = scoreF3(metric);
-  const f4 = scoreF4(metric);
+  const f4 = scoreF4(quote, metric, null);   // priceTarget optional — fetched separately if needed
   const f5 = scoreF5(metric);
-  const f6 = scoreF6(profile, quote, metric);
-  const f7 = scoreF7(news);
+  const f6 = scoreF6(profile, metric);
+  const f7 = scoreF7(profile, news);         // AI Advantage — may return score:null for non-AI
   const f8 = scoreF8(profile, news, insider);
 
-  const factors   = [f1,f2,f3,f4,f5,f6,f7,f8];
-  const total     = factors.reduce((s,f)=>s+f.score,0);
-  const maxScore  = 40;
-  const pct       = Math.round(total/maxScore*100);
+  const factors  = [f1,f2,f3,f4,f5,f6,f7,f8];
+  // F7 score=null means non-AI company — exclude from average (don't penalise)
+  const scored   = factors.filter(f=>f.score!=null);
+  const total    = scored.reduce((s,f)=>s+f.score,0);
+  const maxScore = scored.length*5;
+  const pct      = maxScore>0?Math.round(total/maxScore*100):0;
 
   let verdict, verdictClass;
   if      (pct>=80){verdict='Strong Buy';  verdictClass='v-strong-buy';}
@@ -687,9 +736,13 @@ function ResultsScreen({r,dispatch}){
             <div key={i} className="factor">
               <div className="factor-label" title={f.detail}>{f.label}</div>
               <div className="factor-bar-wrap">
-                <div className="factor-bar" style={{width:`${f.score/5*100}%`,background:barColor(f.score)}}></div>
+                {f.score!=null
+                  ? <div className="factor-bar" style={{width:`${f.score/5*100}%`,background:barColor(f.score)}}></div>
+                  : <div style={{fontSize:'.7rem',color:'#475569',paddingLeft:4,lineHeight:'8px'}}>N/A</div>}
               </div>
-              <div className="factor-score" style={{color:barColor(f.score)}}>{f.score}/5</div>
+              <div className="factor-score" style={{color:f.score!=null?barColor(f.score):'#475569'}}>
+                {f.score!=null?`${f.score}/5`:'—'}
+              </div>
             </div>
           ))}
         </div>
@@ -772,7 +825,7 @@ function ResultsScreen({r,dispatch}){
               <div style={{fontSize:'.85rem',color:'#e2e8f0',fontWeight:600}}>{f.label}</div>
               <div style={{fontSize:'.75rem',color:'#64748b',marginTop:2}}>{f.detail}</div>
             </div>
-            <div style={{fontWeight:800,fontSize:'1rem',color:barColor(f.score),flexShrink:0}}>{f.score}/5</div>
+            <div style={{fontWeight:800,fontSize:'1rem',color:f.score!=null?barColor(f.score):'#475569',flexShrink:0}}>{f.score!=null?`${f.score}/5`:'N/A'}</div>
           </div>
         ))}
       </div>
