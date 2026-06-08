@@ -709,11 +709,12 @@ async function analyze(ticker, apiKey) {
 const INIT = {ticker:'',step:'home',results:null,error:null};
 function reducer(state,action){
   switch(action.type){
-    case 'TICKER': return {...state,ticker:action.v.toUpperCase()};
-    case 'LOAD':   return {...state,step:'loading',error:null};
-    case 'DONE':   return {...state,step:'results',results:action.v};
-    case 'ERR':    return {...state,step:'error',error:action.v};
-    case 'RESET':  return INIT;
+    case 'TICKER':      return {...state,ticker:action.v.toUpperCase()};
+    case 'LOAD':        return {...state,step:'loading',error:null};
+    case 'DONE':        return {...state,step:'results',results:action.v};
+    case 'ERR':         return {...state,step:'error',error:action.v};
+    case 'RESET':       return INIT;
+    case 'UPDATE_TECH': return {...state,results:{...state.results,technicals:action.v}};
     default: return state;
   }
 }
@@ -742,8 +743,15 @@ function sentClass(s){
 }
 
 /* ── Technical Analysis Section ─────────────────────────────────────── */
-function TechnicalsSection({tech, price}) {
+function TechnicalsSection({tech, price, onRetryChart}) {
+  const [chartLoading, setChartLoading] = useState(false);
   if (!tech) return null;
+
+  const handleRetry = async () => {
+    setChartLoading(true);
+    await onRetryChart();
+    setChartLoading(false);
+  };
 
   const fmtP  = v => v ? `$${v.toFixed(2)}` : '—';
   const fmtPct = v => v!=null ? `${v>=0?'+':''}${v.toFixed(1)}%` : '—';
@@ -822,9 +830,23 @@ function TechnicalsSection({tech, price}) {
           </div>
         </div>
       ) : (
-        <div style={{background:'#0f172a',borderRadius:10,padding:'12px 14px',marginBottom:12,textAlign:'center',border:'1px solid #1e293b'}}>
-          <div style={{color:'#64748b',fontSize:'.8rem',marginBottom:4}}>📊 Chart Data Unavailable</div>
-          <div style={{color:'#475569',fontSize:'.72rem',lineHeight:1.5}}>Bollinger Bands, Moving Averages &amp; S/R levels require chart history.<br/>Search the ticker again to retry.</div>
+        <div style={{background:'#0f172a',borderRadius:10,padding:'14px',marginBottom:12,textAlign:'center',border:'1px solid #1e293b'}}>
+          <div style={{color:'#64748b',fontSize:'.8rem',marginBottom:6}}>📊 Chart Data Not Loaded</div>
+          <div style={{color:'#475569',fontSize:'.72rem',lineHeight:1.5,marginBottom:10}}>
+            Bollinger Bands · Moving Averages · Support &amp; Resistance
+          </div>
+          {onRetryChart && (
+            <button
+              onClick={handleRetry}
+              disabled={chartLoading}
+              style={{
+                background:chartLoading?'#1e293b':'linear-gradient(135deg,#0ea5e9,#6366f1)',
+                border:'none',borderRadius:8,color:'#fff',padding:'8px 18px',
+                fontSize:'.8rem',fontWeight:700,cursor:chartLoading?'default':'pointer',opacity:chartLoading?0.6:1
+              }}>
+              {chartLoading ? '⏳ Loading chart data…' : '🔄 Load Chart Data'}
+            </button>
+          )}
         </div>
       )}
 
@@ -1108,7 +1130,7 @@ function ErrorScreen({error,dispatch}){
 }
 
 /* ── Results screen ─────────────────────────────────────────────────── */
-function ResultsScreen({r,dispatch}){
+function ResultsScreen({r,dispatch,onRetryChart}){
   const up = r.chgPct>=0;
   return (
     <div>
@@ -1166,7 +1188,7 @@ function ResultsScreen({r,dispatch}){
       </div>
 
       {/* Technical Analysis — NEW */}
-      <TechnicalsSection tech={r.technicals} price={r.price} />
+      <TechnicalsSection tech={r.technicals} price={r.price} onRetryChart={onRetryChart} />
 
       {/* Quick metrics */}
       <div className="info-grid">
@@ -1266,6 +1288,22 @@ function App(){
   const [apiKey, setApiKey] = useState(()=>getKey());
   const [state,dispatch]    = useReducer(reducer, INIT);
 
+  // Retry: fetch candle data only and update technicals without re-running full analysis
+  const handleRetryChart = async () => {
+    if (!state.results) return;
+    const sym  = state.results.symbol;
+    const t    = `token=${apiKey}`;
+    const now2 = Math.floor(Date.now()/1000);
+    const from = now2 - 210*24*60*60;
+    const url  = `${FH}/stock/candle?symbol=${sym}&resolution=D&from=${from}&to=${now2}&${t}`;
+    try {
+      const res   = await safeFetch(url, 25000).catch(()=>null);
+      const daily = res ? await res.json().catch(()=>null) : null;
+      const tech  = calculateTechnicals(daily, null, state.results.price, state.results.rawMetric);
+      dispatch({type:'UPDATE_TECH', v:tech});
+    } catch(e) { /* silently fail — button stays visible */ }
+  };
+
   if (!apiKey) return <KeyScreen onSave={k=>{saveKey(k); setApiKey(k);}}/>;
 
   return (
@@ -1274,7 +1312,7 @@ function App(){
                                    onResetKey={()=>{localStorage.removeItem('sa_fh_key'); setApiKey('');}}/>}
       {state.step==='loading' && <LoadingScreen ticker={state.ticker}/>}
       {state.step==='error'   && <ErrorScreen error={state.error} dispatch={dispatch}/>}
-      {state.step==='results' && <ResultsScreen r={state.results} dispatch={dispatch}/>}
+      {state.step==='results' && <ResultsScreen r={state.results} dispatch={dispatch} onRetryChart={handleRetryChart}/>}
     </div>
   );
 }
