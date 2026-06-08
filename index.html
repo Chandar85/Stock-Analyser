@@ -573,13 +573,18 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
   const resistance = hi52 || null;
 
   // ── Candle-based swing S&R (bonus when available) ──
-  if (!daily || daily.s !== 'ok' || !daily.c || daily.c.length < 6) {
+  // Accept data even if s !== 'ok' — Finnhub sometimes returns 'no_data' status with valid prices
+  const rawC = daily?.c || [];
+  const validCloses = rawC.filter(v => v && v > 0);
+  if (validCloses.length < 6) {
     return {rangePos, vol, ret, swingLevels:null, bb:null, bbPos:null, metricOnly:true};
   }
 
-  const closes  = daily.c;
-  const highs   = daily.h || closes;
-  const lows    = daily.l || closes;
+  const closes  = validCloses;
+  const rawH = daily.h || [];
+  const rawL = daily.l || [];
+  const highs   = rawH.filter(v=>v&&v>0).length >= 6 ? rawH.filter(v=>v&&v>0) : closes;
+  const lows    = rawL.filter(v=>v&&v>0).length >= 6 ? rawL.filter(v=>v&&v>0) : closes;
   const volumes = daily.v || [];
   const n       = closes.length;
 
@@ -745,12 +750,15 @@ function sentClass(s){
 /* ── Technical Analysis Section ─────────────────────────────────────── */
 function TechnicalsSection({tech, price, onRetryChart}) {
   const [chartLoading, setChartLoading] = useState(false);
+  const [chartErr, setChartErr] = useState(null);
   if (!tech) return null;
 
   const handleRetry = async () => {
     setChartLoading(true);
-    await onRetryChart();
+    setChartErr(null);
+    const ok = await onRetryChart();
     setChartLoading(false);
+    if (!ok) setChartErr('Chart data unavailable from Finnhub right now. Try again in a minute.');
   };
 
   const fmtP  = v => v ? `$${v.toFixed(2)}` : '—';
@@ -847,6 +855,7 @@ function TechnicalsSection({tech, price, onRetryChart}) {
               {chartLoading ? '⏳ Loading chart data…' : '🔄 Load Chart Data'}
             </button>
           )}
+          {chartErr && <div style={{color:'#f87171',fontSize:'.72rem',marginTop:8}}>{chartErr}</div>}
         </div>
       )}
 
@@ -1290,7 +1299,7 @@ function App(){
 
   // Retry: fetch candle data only and update technicals without re-running full analysis
   const handleRetryChart = async () => {
-    if (!state.results) return;
+    if (!state.results) return false;
     const sym  = state.results.symbol;
     const t    = `token=${apiKey}`;
     const now2 = Math.floor(Date.now()/1000);
@@ -1301,7 +1310,8 @@ function App(){
       const daily = res ? await res.json().catch(()=>null) : null;
       const tech  = calculateTechnicals(daily, null, state.results.price, state.results.rawMetric);
       dispatch({type:'UPDATE_TECH', v:tech});
-    } catch(e) { /* silently fail — button stays visible */ }
+      return !tech.metricOnly; // true = chart data loaded successfully
+    } catch(e) { return false; }
   };
 
   if (!apiKey) return <KeyScreen onSave={k=>{saveKey(k); setApiKey(k);}}/>;
