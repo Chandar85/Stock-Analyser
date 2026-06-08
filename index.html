@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Stock Analyzer</title>
-<meta name="description" content="AI-powered US stock analyzer — fundamentals, momentum, news &amp; whale activity"/>
+<meta name="description" content="AI-powered US stock analyzer — fundamentals, technicals, momentum &amp; whale activity"/>
 <meta name="theme-color" content="#0f172a"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
@@ -112,9 +112,27 @@ a{color:#38bdf8;text-decoration:none}
 .tag-flag{background:#1e293b;color:#94a3b8;border:1px solid #334155}
 /* Disclaimer */
 .disclaimer{text-align:center;font-size:.72rem;color:#475569;padding:12px 0 24px;line-height:1.5}
+/* ── Technical Analysis ── */
+.tech-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.tech-item{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 12px}
+.t-label{font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;color:#475569}
+.t-value{font-size:.9rem;font-weight:700;color:#e2e8f0;margin-top:2px}
+.t-sub{font-size:.72rem;margin-top:2px}
+.signal-bar{padding:10px 14px;border-radius:10px;margin-bottom:10px}
+/* ── Financial Details ── */
+.fin-toggle{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:#94a3b8;font-size:.82rem;cursor:pointer;text-align:left;display:flex;justify-content:space-between;align-items:center;margin-top:10px}
+.fin-toggle:hover{border-color:#475569;color:#e2e8f0}
+.fin-category{margin-top:14px}
+.fin-cat-title{font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #1e293b}
+.fin-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.fin-item{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:#0f172a;border-radius:6px}
+.fn{font-size:.7rem;color:#64748b}
+.fv{font-size:.75rem;font-weight:700}
+.fin-key{border:1px solid #334155!important}
 @media(max-width:480px){
   .header h1{font-size:1.6rem}
   .factor-label{width:150px}
+  .tech-grid{grid-template-columns:1fr 1fr}
 }
 </style>
 </head>
@@ -128,8 +146,6 @@ const {useState,useReducer,useEffect,useRef} = React;
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 const FH = 'https://finnhub.io/api/v1';
-
-// Embed key here — change to your Finnhub key
 const EMBEDDED_KEY = 'd8bclj1r01qhrj7r3670d8bclj1r01qhrj7r367g';
 
 const SECTOR_PE = {
@@ -166,15 +182,14 @@ const WHALES = [
 
 const BUY_WORDS  = ['buy','buys','bought','purchase','purchased','acqui','stake','invest','position','holding','adds','added','accumulate','long','bullish','increase','backed','back','bet on'];
 const SELL_WORDS = ['sell','sold','dump','exit','short','bearish','reduce','trim','divest','unload','offload','decrease','cut stake'];
-
 const POS_NEWS = ['beat','beats','record','profit','growth','strong','surge','soar','rise','gain','upgrade','outperform','bullish','positive','exceeds','top','raises guidance'];
 const NEG_NEWS = ['miss','misses','loss','losses','decline','weak','fall','drop','downgrade','underperform','cut','lawsuit','warning','concern','disappointing','bearish','negative','probe','investigation'];
 
-/* ── Key storage ──────────────────────────────────────────────────── */
+/* ── Key storage ────────────────────────────────────────────────────── */
 function getKey() { return EMBEDDED_KEY || localStorage.getItem('sa_fh_key') || ''; }
 function saveKey(k) { localStorage.setItem('sa_fh_key', k.trim()); }
 
-/* ── Cache helpers ────────────────────────────────────────────────── */
+/* ── Cache helpers ──────────────────────────────────────────────────── */
 const CACHE_TTL = 23*60*60*1000;
 function getCache(ticker, key) {
   try {
@@ -190,7 +205,7 @@ function setCache(ticker, key, data) {
 }
 function isCached(ticker) { return !!(getCache(ticker,'fhp') && getCache(ticker,'fhm')); }
 
-/* ── Fetch layer ──────────────────────────────────────────────────── */
+/* ── Fetch helpers ──────────────────────────────────────────────────── */
 async function safeFetch(url, timeoutMs=12000) {
   const ctrl = new AbortController();
   const timer = setTimeout(()=>ctrl.abort(), timeoutMs);
@@ -200,11 +215,33 @@ async function safeFetch(url, timeoutMs=12000) {
   } catch(e) {
     if (e.name==='AbortError') throw new Error('Request timed out. Check your internet connection and try again.');
     throw new Error('Network error: ' + e.message);
-  } finally {
-    clearTimeout(timer);
-  }
+  } finally { clearTimeout(timer); }
 }
 
+/* ── SMA helper ─────────────────────────────────────────────────────── */
+function sma(arr, period) {
+  if (!arr || arr.length < 1) return null;
+  const p = Math.min(period, arr.length);
+  const s = arr.slice(-p);
+  return s.reduce((a,b)=>a+b, 0) / p;
+}
+
+/* ── Candle fetch for technicals ────────────────────────────────────── */
+async function fetchCandles(sym, apiKey) {
+  const t = `token=${apiKey}`;
+  const now = Math.floor(Date.now()/1000);
+  const from200d = now - 220*24*60*60;
+  const from200w = now - 210*7*24*60*60;
+  const [dr, wr] = await Promise.all([
+    safeFetch(`${FH}/stock/candle?symbol=${sym}&resolution=D&from=${from200d}&to=${now}&${t}`, 15000).catch(()=>null),
+    safeFetch(`${FH}/stock/candle?symbol=${sym}&resolution=W&from=${from200w}&to=${now}&${t}`, 15000).catch(()=>null),
+  ]);
+  const daily  = dr ? await dr.json().catch(()=>null) : null;
+  const weekly = wr ? await wr.json().catch(()=>null) : null;
+  return {daily, weekly};
+}
+
+/* ── Main data fetch ────────────────────────────────────────────────── */
 async function fetchAll(rawTicker, apiKey) {
   const sym = rawTicker.toUpperCase();
   const t = `token=${apiKey}`;
@@ -215,7 +252,6 @@ async function fetchAll(rawTicker, apiKey) {
   const today = new Date().toISOString().split('T')[0];
   const from  = new Date(Date.now()-90*24*60*60*1000).toISOString().split('T')[0];
 
-  // Critical fetches — must succeed
   const criticalFetches = [];
   if (!profile) criticalFetches.push({key:'profile', url:`${FH}/stock/profile2?symbol=${sym}&${t}`});
   if (!metric)  criticalFetches.push({key:'metric',  url:`${FH}/stock/metric?symbol=${sym}&metric=all&${t}`});
@@ -244,24 +280,27 @@ async function fetchAll(rawTicker, apiKey) {
     metric = result.metric;
   }
 
-  // Optional fetches — fail silently so app still works
+  // Optional fetches — fail silently
   const [newsRes, insiderRes] = await Promise.all([
     safeFetch(`${FH}/company-news?symbol=${sym}&from=${from}&to=${today}&${t}`).catch(()=>null),
     safeFetch(`${FH}/stock/insider-transactions?symbol=${sym}&${t}`).catch(()=>null),
   ]);
-  const news    = newsRes    ? await newsRes.json().catch(()=>[])           : [];
+  const news    = newsRes    ? await newsRes.json().catch(()=>[])             : [];
   const insider = insiderRes ? await insiderRes.json().catch(()=>({data:[]})) : {data:[]};
 
+  // Candle data for technicals — optional, fail silently
+  const {daily, weekly} = await fetchCandles(sym, apiKey).catch(()=>({daily:null, weekly:null}));
+
   return {
-    profile,
-    metric,
+    profile, metric,
     quote:   result.quote || {},
     news:    Array.isArray(news) ? news : [],
     insider: insider || {data:[]},
+    daily, weekly,
   };
 }
 
-/* ── Sector PE lookup ─────────────────────────────────────────────── */
+/* ── Sector PE lookup ───────────────────────────────────────────────── */
 function getSectorPe(industry) {
   const txt = (industry||'').toLowerCase();
   for (const [k,v] of Object.entries(SECTOR_PE))
@@ -269,9 +308,8 @@ function getSectorPe(industry) {
   return 22;
 }
 
-/* ── Scoring functions — original 8 filters ─────────────────────── */
+/* ── Scoring F1-F8 ──────────────────────────────────────────────────── */
 
-// F1: Revenue Growth (YoY + trend)
 function scoreF1(metric) {
   const m = metric?.metric || {};
   const yoy = m.revenueGrowthTTMYoy ?? m.salesGrowthTTMYoy;
@@ -288,7 +326,6 @@ function scoreF1(metric) {
   return {score,label:'Revenue Growth',detail,color:barColor(score)};
 }
 
-// F2: Margin Quality (gross margin + operating margin = pricing power & efficiency)
 function scoreF2(metric) {
   const m = metric?.metric || {};
   let gm = m.grossMarginTTM ?? m.grossMargin ?? m.grossProfitMarginTTM;
@@ -309,7 +346,6 @@ function scoreF2(metric) {
   return {score,label:'Margin Quality',detail:parts.join('. '),color:barColor(score)};
 }
 
-// F3: Financial Strength (ROE + Debt/Equity)
 function scoreF3(metric) {
   const m = metric?.metric || {};
   let roe = m.roeTTM ?? m.roeRfy ?? m.roeAnnual;
@@ -330,7 +366,6 @@ function scoreF3(metric) {
   return {score,label:'Financial Strength',detail:parts.join('. '),color:barColor(score)};
 }
 
-// F4: Price Timing (52-week range + analyst target)
 function scoreF4(quote, metric, priceTarget) {
   const m = metric?.metric || {};
   const hi=m['52WeekHigh'], lo=m['52WeekLow'], cur=quote.c;
@@ -353,7 +388,6 @@ function scoreF4(quote, metric, priceTarget) {
   return {score,label:'Price Timing',detail,color:barColor(score)};
 }
 
-// F5: Risk Profile (beta + net margin stability)
 function scoreF5(metric) {
   const m = metric?.metric || {};
   const beta = m.beta;
@@ -373,7 +407,6 @@ function scoreF5(metric) {
   return {score,label:'Risk Profile',detail:parts.join('. '),color:barColor(score)};
 }
 
-// F6: Valuation (P/E vs sector benchmark)
 function scoreF6(profile, metric) {
   const m = metric?.metric || {};
   const pe = m.peTTM || m.peNormalizedAnnual || m.peExclExtraTTM;
@@ -391,11 +424,9 @@ function scoreF6(profile, metric) {
   return {score,label:'Valuation',detail,color:barColor(score)};
 }
 
-// F7: AI Advantage — score null for non-AI stocks (excluded from avg, not penalised)
 function scoreF7(profile, news) {
   const sym = (profile.ticker||'').toUpperCase();
   const industry = (profile.finnhubIndustry||'').toLowerCase();
-
   if (AI_LEADERS.has(sym)) {
     const reasons = {
       NVDA:'NVIDIA dominates AI compute — backbone of the entire AI industry',
@@ -413,27 +444,21 @@ function scoreF7(profile, news) {
     };
     return {score:5, label:'🤖 AI Advantage', detail:reasons[sym]||`${sym} is a recognised AI leader with a strong competitive moat`, level:'leader', color:'#4ade80'};
   }
-
   const newsText = (Array.isArray(news)?news:[]).slice(0,25)
     .map(a=>((a.headline||'')+(a.summary||'')).toLowerCase()).join(' ');
   const aiTerms = ['artificial intelligence','machine learning',' ai ','generative ai','llm','large language','neural network','deep learning','chatgpt','copilot','gemini','gpt-'];
   const isTechSector = ['technology','software','semiconductor','internet','cloud','data','cybersecurity'].some(t=>industry.includes(t));
   const hasAInews = aiTerms.some(t=>newsText.includes(t));
-
   if (isTechSector && hasAInews)
     return {score:3, label:'🤖 AI Advantage', detail:`AI initiatives detected in news. Operates in ${profile.finnhubIndustry||'tech'} — AI-adjacent sector`, level:'participant', color:'#fde047'};
   if (isTechSector)
     return {score:2, label:'🤖 AI Advantage', detail:`Technology sector — potential AI beneficiary but no specific AI moat detected`, level:'participant', color:'#64748b'};
-
-  // Not an AI company → excluded from final average
   return {score:null, label:'🤖 AI Advantage', detail:`Traditional business — AI not applicable. Score excluded from average.`, level:'none', color:'#475569'};
 }
 
 function scoreF8(profile, news, insider) {
   const sym  = (profile.ticker||'').toUpperCase();
   const name = (profile.name||'').toLowerCase();
-
-  // Whale detection from news
   const whaleHits = [];
   for (const a of news.slice(0,50)) {
     const txt = ((a.headline||'')+(a.summary||'')).toLowerCase();
@@ -444,12 +469,9 @@ function scoreF8(profile, news, insider) {
       if (!whale.terms.some(t=>txt.includes(t))) continue;
       const isBuy  = BUY_WORDS.some(k=>txt.includes(k));
       const isSell = SELL_WORDS.some(k=>txt.includes(k));
-      whaleHits.push({name:whale.name, icon:whale.icon,
-        action: isSell?'sell':(isBuy?'buy':'mention'), title:a.headline});
+      whaleHits.push({name:whale.name, icon:whale.icon, action:isSell?'sell':(isBuy?'buy':'mention'), title:a.headline});
     }
   }
-
-  // Insider trades from Finnhub (clean P=buy / S=sell codes)
   const cutoff = Date.now()-180*24*60*60*1000;
   const trades = (insider?.data||[]).filter(t=>{
     const d = new Date(t.transactionDate||t.filingDate||0);
@@ -457,11 +479,9 @@ function scoreF8(profile, news, insider) {
   });
   const iBuys  = trades.filter(t=>t.transactionCode==='P');
   const iSells = trades.filter(t=>t.transactionCode==='S');
-
   const buyCount  = whaleHits.filter(h=>h.action==='buy').length;
   const sellCount = whaleHits.filter(h=>h.action==='sell').length;
   let score=3, detail='No notable activity detected';
-
   if      (buyCount>=2)                         {score=5; detail=`${buyCount} major investors buying!`;}
   else if (buyCount===1 && iBuys.length>=2)     {score=5; detail=`${whaleHits.find(h=>h.action==='buy').name} + ${iBuys.length} insider buys`;}
   else if (buyCount===1)                        {score=4; detail=`${whaleHits.find(h=>h.action==='buy').name} buying`;}
@@ -469,38 +489,137 @@ function scoreF8(profile, news, insider) {
   else if (iBuys.length>=1)                     {score=3; detail=`${iBuys.length} insider purchase(s)`;}
   else if (sellCount>=2||iSells.length>=3)      {score=2; detail:`Heavy insider/whale selling`;}
   else if (sellCount===1)                       {score=2; detail:`${whaleHits.find(h=>h.action==='sell').name} selling`;}
-
   const insiders = [
     ...iBuys.slice(0,3).map(t=>({name:t.name,date:t.transactionDate,action:'buy',val:t.value})),
     ...iSells.slice(0,3).map(t=>({name:t.name,date:t.transactionDate,action:'sell',val:t.value})),
   ];
-
   return {score,label:'Whale / Insider Activity',detail,color:barColor(score),whales:whaleHits,insiders};
 }
 
-/* ── Analyse entry point ─────────────────────────────────────────── */
+/* ── Calculate Technicals ───────────────────────────────────────────── */
+function calculateTechnicals(daily, weekly, currentPrice) {
+  if (!daily || daily.s !== 'ok' || !daily.c || daily.c.length < 20) return null;
+  const closes  = daily.c;
+  const volumes = daily.v || [];
+  const n       = closes.length;
+  const price   = currentPrice;
+
+  const ma50  = n >= 50  ? sma(closes, 50)              : null;
+  const ma200 = n >= 100 ? sma(closes, Math.min(200,n)) : null;
+  let ma200w = null;
+  if (weekly?.s==='ok' && weekly.c?.length > 10)
+    ma200w = sma(weekly.c, Math.min(200, weekly.c.length));
+
+  // Bollinger Bands — 20-day
+  let bb = null;
+  if (n >= 20) {
+    const sl   = closes.slice(-20);
+    const mean = sl.reduce((a,b)=>a+b,0)/20;
+    const std  = Math.sqrt(sl.reduce((a,b)=>a+Math.pow(b-mean,2),0)/20);
+    bb = {upper:mean+2*std, middle:mean, lower:mean-2*std};
+  }
+
+  // Bollinger position
+  let bbPos = null;
+  if (bb && price) {
+    const range = bb.upper - bb.lower;
+    const pct   = range>0 ? Math.max(0, Math.min(1, (price-bb.lower)/range)) : 0.5;
+    const zones = [
+      {max:0.15,label:'📉 Lower Band',   detail:'Potentially oversold — watch for reversal entry',   color:'#4ade80', zone:'bottom'},
+      {max:0.40,label:'⬇️ Lower Half',   detail:'Below midpoint — building momentum possible',        color:'#86efac', zone:'lower'},
+      {max:0.60,label:'➡️ Middle Band',  detail:'At 20-day moving average — neutral territory',       color:'#fde047', zone:'middle'},
+      {max:0.85,label:'⬆️ Upper Half',   detail:'Above midpoint — momentum intact',                   color:'#fbbf24', zone:'upper'},
+      {max:1.00,label:'📈 Upper Band',   detail:'Potentially overbought — caution on new entries',    color:'#f87171', zone:'top'},
+    ];
+    bbPos = {...(zones.find(z=>pct<=z.max)||zones[4]), pct:Math.round(pct*100)};
+  }
+
+  // MA signals
+  const maSignal = (ma, lbl) => ma ? {
+    val:ma,
+    label: price>ma ? `Above ${lbl} ✓` : `Below ${lbl} ⚠️`,
+    color: price>ma ? '#4ade80' : '#f87171'
+  } : null;
+  const s50   = maSignal(ma50,  '50 DMA');
+  const s200  = maSignal(ma200, '200 DMA');
+  const s200w = maSignal(ma200w,'200 WMA');
+
+  // Golden / Death cross
+  let cross = null;
+  if (n >= 55 && ma50 && ma200) {
+    const pm50  = sma(closes.slice(0,-5), 50);
+    const pm200 = sma(closes.slice(0,-5), Math.min(200, n-5));
+    if (pm50 && pm200) {
+      if (pm50 < pm200 && ma50 > ma200)
+        cross = {label:'🟡 Golden Cross!', detail:'50 DMA just crossed ABOVE 200 DMA — very bullish signal', color:'#fde047'};
+      else if (pm50 > pm200 && ma50 < ma200)
+        cross = {label:'☠️ Death Cross!',  detail:'50 DMA just crossed BELOW 200 DMA — bearish warning',    color:'#f87171'};
+    }
+  }
+
+  // Volume Momentum
+  let vol = null;
+  if (volumes.length >= 10) {
+    const avg = sma(volumes.slice(0,-1), Math.min(30, volumes.length-1));
+    const cur = volumes[volumes.length-1];
+    if (avg && avg > 0) {
+      const r = cur/avg;
+      vol = {
+        current:cur, avg, ratio:r,
+        label:  r>=2.0 ? '🔥🔥 Extreme Volume' : r>=1.5 ? '🔥 High Momentum' : r>=0.7 ? '➡️ Normal Volume' : '⬇️ Low Volume',
+        color:  r>=1.5 ? '#4ade80' : r>=0.7 ? '#94a3b8' : '#f87171',
+        signal: r>=1.5 ? 'high'    : r>=0.7 ? 'neutral' : 'low',
+      };
+    }
+  }
+
+  // Support & Resistance (20-day price action)
+  const r20 = closes.slice(-20);
+  const support    = Math.min(...r20);
+  const resistance = Math.max(...r20);
+
+  // Power signal — how many of 5 signals are bullish?
+  const bullCount = [
+    s50?.color  === '#4ade80',
+    s200?.color === '#4ade80',
+    s200w?.color=== '#4ade80',
+    bbPos?.zone === 'bottom' || bbPos?.zone === 'lower',
+    vol?.signal === 'high',
+  ].filter(Boolean).length;
+
+  let power = null;
+  if (bullCount >= 5)
+    power = {label:'⚡ HIGH CONVICTION SETUP', detail:'All 5 signals align — above all MAs, near BB support, high volume', color:'#4ade80'};
+  else if (bullCount >= 4)
+    power = {label:'✅ Strong Setup',          detail:'4 of 5 signals bullish — very favorable entry conditions',          color:'#86efac'};
+  else if (bullCount >= 3)
+    power = {label:'🔍 Watch Closely',         detail:'3 of 5 signals building — setup developing',                       color:'#fde047'};
+
+  return {ma50, ma200, ma200w, s50, s200, s200w, bb, bbPos, cross, vol, support, resistance, power};
+}
+
+/* ── Analyse ────────────────────────────────────────────────────────── */
 async function analyze(ticker, apiKey) {
-  const {profile,metric,quote,news,insider} = await fetchAll(ticker, apiKey);
+  const {profile,metric,quote,news,insider,daily,weekly} = await fetchAll(ticker, apiKey);
   const m = metric?.metric || {};
 
   const price  = quote.c || 0;
   const chgPct = quote.dp || 0;
-  const mktCap = (profile.marketCapitalization||0)*1e6; // Finnhub gives millions
+  const mktCap = (profile.marketCapitalization||0)*1e6;
 
   let div = m.dividendYieldIndicatedAnnual || 0;
-  if (div>0 && div<0.5) div*=100; // normalise decimal → %
+  if (div>0 && div<0.5) div*=100;
 
   const f1 = scoreF1(metric);
   const f2 = scoreF2(metric);
   const f3 = scoreF3(metric);
-  const f4 = scoreF4(quote, metric, null);   // priceTarget optional — fetched separately if needed
+  const f4 = scoreF4(quote, metric, null);
   const f5 = scoreF5(metric);
   const f6 = scoreF6(profile, metric);
-  const f7 = scoreF7(profile, news);         // AI Advantage — may return score:null for non-AI
+  const f7 = scoreF7(profile, news);
   const f8 = scoreF8(profile, news, insider);
 
   const factors  = [f1,f2,f3,f4,f5,f6,f7,f8];
-  // F7 score=null means non-AI company — exclude from average (don't penalise)
   const scored   = factors.filter(f=>f.score!=null);
   const total    = scored.reduce((s,f)=>s+f.score,0);
   const maxScore = scored.length*5;
@@ -521,6 +640,8 @@ async function analyze(ticker, apiKey) {
     return {title:a.headline, url:a.url, sentiment, source:a.source};
   });
 
+  const technicals = calculateTechnicals(daily, weekly, price);
+
   return {
     symbol:  profile.ticker  || ticker.toUpperCase(),
     name:    profile.name    || ticker,
@@ -537,10 +658,12 @@ async function analyze(ticker, apiKey) {
     isAI: AI_LEADERS.has((profile.ticker||'').toUpperCase()),
     topNews,
     f8details:{whales:f8.whales, insiders:f8.insiders},
+    technicals,
+    rawMetric: m,
   };
 }
 
-/* ── State management ─────────────────────────────────────────────── */
+/* ── State management ───────────────────────────────────────────────── */
 const INIT = {ticker:'',step:'home',results:null,error:null};
 function reducer(state,action){
   switch(action.type){
@@ -553,13 +676,20 @@ function reducer(state,action){
   }
 }
 
-/* ── UI helpers ────────────────────────────────────────────────────── */
+/* ── UI helpers ─────────────────────────────────────────────────────── */
 function barColor(s){ return s>=4?'#4ade80':s===3?'#fde047':'#f87171'; }
 function fmt(n){
   if(n>=1e12) return `$${(n/1e12).toFixed(2)}T`;
   if(n>=1e9)  return `$${(n/1e9).toFixed(2)}B`;
   if(n>=1e6)  return `$${(n/1e6).toFixed(2)}M`;
   return `$${n.toLocaleString()}`;
+}
+function fmtVol(v){
+  if(v==null||v===0) return '—';
+  if(v>=1e9) return `${(v/1e9).toFixed(2)}B`;
+  if(v>=1e6) return `${(v/1e6).toFixed(2)}M`;
+  if(v>=1e3) return `${(v/1e3).toFixed(0)}K`;
+  return v.toFixed(0);
 }
 function sentClass(s){
   if(!s) return 'sent-neu';
@@ -569,7 +699,256 @@ function sentClass(s){
   return 'sent-neu';
 }
 
-/* ── Key setup screen ─────────────────────────────────────────────── */
+/* ── Technical Analysis Section ─────────────────────────────────────── */
+function TechnicalsSection({tech, price}) {
+  if (!tech) return (
+    <div className="section-card" style={{marginBottom:16}}>
+      <h2>📈 Technical Analysis</h2>
+      <div style={{color:'#475569',fontSize:'.82rem',textAlign:'center',padding:'8px 0'}}>
+        Technical data unavailable for this symbol
+      </div>
+    </div>
+  );
+
+  const fmtP = v => v ? `$${v.toFixed(2)}` : '—';
+
+  return (
+    <div className="section-card" style={{marginBottom:16}}>
+      <h2>📈 Technical Analysis</h2>
+
+      {/* Power signal */}
+      {tech.power && (
+        <div style={{background:'#0f172a',border:`1px solid ${tech.power.color}33`,borderRadius:10,padding:'10px 14px',marginBottom:10,textAlign:'center'}}>
+          <div style={{color:tech.power.color,fontWeight:800,fontSize:'.9rem'}}>{tech.power.label}</div>
+          <div style={{color:'#94a3b8',fontSize:'.73rem',marginTop:3}}>{tech.power.detail}</div>
+        </div>
+      )}
+
+      {/* Golden / Death Cross */}
+      {tech.cross && (
+        <div style={{background:'#0f172a',border:`1px solid ${tech.cross.color}55`,borderRadius:10,padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:8}}>
+          <span style={{color:tech.cross.color,fontWeight:800,fontSize:'.85rem'}}>{tech.cross.label}</span>
+          <span style={{color:'#64748b',fontSize:'.73rem'}}>{tech.cross.detail}</span>
+        </div>
+      )}
+
+      {/* Bollinger Band visual */}
+      {tech.bb && tech.bbPos && (
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:6}}>
+            Bollinger Bands (20-day) — Current position
+          </div>
+          <div style={{position:'relative',height:'6px',background:'#1e293b',borderRadius:999,margin:'10px 0 6px'}}>
+            <div style={{position:'absolute',left:0,right:0,height:'100%',background:'linear-gradient(90deg,#4ade80 0%,#fde047 50%,#f87171 100%)',borderRadius:999,opacity:0.35}}></div>
+            <div style={{
+              position:'absolute',
+              left:`${tech.bbPos.pct}%`,
+              top:'-5px',
+              width:'16px',height:'16px',
+              background:tech.bbPos.color,
+              borderRadius:'50%',
+              transform:'translateX(-50%)',
+              boxShadow:`0 0 6px ${tech.bbPos.color}88`,
+            }}></div>
+          </div>
+          <div style={{display:'flex',justifyContent:'space-between',fontSize:'.65rem',color:'#475569',marginTop:4}}>
+            <span>Lower {fmtP(tech.bb.lower)}</span>
+            <span style={{color:tech.bbPos.color,fontWeight:700}}>{tech.bbPos.label}</span>
+            <span>Upper {fmtP(tech.bb.upper)}</span>
+          </div>
+          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:4,textAlign:'center'}}>
+            {tech.bbPos.detail} · Mid: {fmtP(tech.bb.middle)}
+          </div>
+        </div>
+      )}
+
+      {/* Moving Averages grid */}
+      <div className="tech-grid">
+        {[
+          {label:'50 DMA',   sig:tech.s50},
+          {label:'200 DMA',  sig:tech.s200},
+          {label:'200 WMA',  sig:tech.s200w},
+        ].filter(x=>x.sig).map(({label,sig},i)=>(
+          <div key={i} className="tech-item">
+            <div className="t-label">{label}</div>
+            <div className="t-value">{fmtP(sig.val)}</div>
+            <div className="t-sub" style={{color:sig.color}}>{sig.label}</div>
+          </div>
+        ))}
+        {tech.bb && (
+          <div className="tech-item">
+            <div className="t-label">BB Middle (20D SMA)</div>
+            <div className="t-value">{fmtP(tech.bb.middle)}</div>
+            <div className="t-sub" style={{color:'#64748b'}}>20-day average</div>
+          </div>
+        )}
+      </div>
+
+      {/* Volume Momentum */}
+      {tech.vol && (
+        <div style={{background:'#0f172a',borderRadius:10,padding:'10px 14px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Volume Momentum</div>
+            <div style={{color:tech.vol.color,fontWeight:700,fontSize:'.9rem',marginTop:2}}>{tech.vol.label}</div>
+            <div style={{fontSize:'.72rem',color:'#64748b',marginTop:2}}>
+              Today {fmtVol(tech.vol.current)} vs 30-day avg {fmtVol(tech.vol.avg)}
+            </div>
+          </div>
+          <div style={{fontSize:'1.5rem',fontWeight:900,color:tech.vol.color,minWidth:40,textAlign:'right'}}>
+            {tech.vol.ratio.toFixed(1)}x
+          </div>
+        </div>
+      )}
+
+      {/* Support & Resistance */}
+      {(tech.support || tech.resistance) && (
+        <div style={{display:'flex',gap:8}}>
+          {tech.support && (
+            <div style={{flex:1,background:'#0f172a',borderRadius:10,padding:'10px 12px'}}>
+              <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Support (20D low)</div>
+              <div style={{color:'#4ade80',fontWeight:700,fontSize:'.9rem',marginTop:2}}>{fmtP(tech.support)}</div>
+            </div>
+          )}
+          {tech.resistance && (
+            <div style={{flex:1,background:'#0f172a',borderRadius:10,padding:'10px 12px'}}>
+              <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Resistance (20D high)</div>
+              <div style={{color:'#f87171',fontWeight:700,fontSize:'.9rem',marginTop:2}}>{fmtP(tech.resistance)}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Financial Details Section ──────────────────────────────────────── */
+function FinancialDetailsSection({m}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const n  = (v,d=1) => v!=null ? v.toFixed(d) : null;
+  const pf = v => { if(v==null) return '—'; const x=Math.abs(v)<=1?v*100:v; return `${x.toFixed(1)}%`; };
+  const nf = (v,d=1) => v!=null ? v.toFixed(d) : '—';
+  const mf = v => v!=null ? (v>=1e9?`$${(v/1e9).toFixed(1)}B`:v>=1e6?`$${(v/1e6).toFixed(1)}M`:v>=1e3?`$${(v/1e3).toFixed(0)}K`:`$${v.toFixed(0)}`) : '—';
+
+  // Top 10 key parameters that drive the score
+  const keyParams = [
+    {n:'Revenue Growth (YoY)', v:pf(m.revenueGrowthTTMYoy??m.salesGrowthTTMYoy)},
+    {n:'EPS Growth (YoY)',      v:pf(m.epsGrowthTTMYoy)},
+    {n:'Gross Margin',          v:pf(m.grossMarginTTM??m.grossMarginAnnual)},
+    {n:'Operating Margin',      v:pf(m.operatingMarginTTM??m.operatingMarginAnnual)},
+    {n:'ROE',                   v:pf(m.roeTTM??m.roeRfy)},
+    {n:'Debt / Equity',         v:nf(m['totalDebt/totalEquityAnnual']??m['totalDebt/totalEquityQuarterly'])},
+    {n:'P/E Ratio (TTM)',        v:nf(m.peTTM??m.peExclExtraTTM)},
+    {n:'P/B Ratio',              v:nf(m.pbAnnual??m.pbQuarterly)},
+    {n:'Free Cash Flow',         v:mf(m.freeCashFlowTTM??m.freeCashFlowAnnual)},
+    {n:'Current Ratio',          v:nf(m.currentRatioAnnual??m.currentRatioQuarterly)},
+  ];
+
+  const categories = [
+    { title:'📈 Growth', items:[
+      {n:'Revenue Growth (YoY)',  v:pf(m.revenueGrowthTTMYoy??m.salesGrowthTTMYoy)},
+      {n:'Revenue Growth (3Y)',   v:pf(m.revenueGrowth3Y)},
+      {n:'Revenue Growth (5Y)',   v:pf(m.revenueGrowth5Y)},
+      {n:'EPS Growth (YoY)',      v:pf(m.epsGrowthTTMYoy)},
+      {n:'EPS Growth (3Y)',       v:pf(m.epsGrowth3Y)},
+      {n:'EPS Growth (5Y)',       v:pf(m.epsGrowth5Y)},
+      {n:'EBITDA CAGR (5Y)',      v:pf(m.ebitdaCagr5Y)},
+    ]},
+    { title:'💰 Profitability', items:[
+      {n:'Gross Margin',          v:pf(m.grossMarginTTM??m.grossMarginAnnual)},
+      {n:'Operating Margin',      v:pf(m.operatingMarginTTM??m.operatingMarginAnnual)},
+      {n:'Net Margin',            v:pf(m.netProfitMarginTTM??m.netProfitMarginAnnual)},
+      {n:'Pretax Margin',         v:pf(m.pretaxMarginTTM??m.pretaxMarginAnnual)},
+      {n:'ROE',                   v:pf(m.roeTTM??m.roeRfy)},
+      {n:'ROA',                   v:pf(m.roaTTM??m.roaRfy)},
+      {n:'ROI',                   v:pf(m.roiTTM??m.roiAnnual)},
+    ]},
+    { title:'📊 Valuation', items:[
+      {n:'P/E (TTM)',              v:nf(m.peTTM??m.peExclExtraTTM)},
+      {n:'P/E (Normalized)',       v:nf(m.peNormalizedAnnual)},
+      {n:'P/B',                   v:nf(m.pbAnnual??m.pbQuarterly)},
+      {n:'P/S',                   v:nf(m.psAnnual??m.psTTM)},
+      {n:'P/FCF',                 v:nf(m.pfcfShareAnnual??m.pfcfShareTTM)},
+      {n:'EV/FCF (TTM)',           v:nf(m['currentEv/freeCashFlowTTM'])},
+    ]},
+    { title:'🏦 Financial Health', items:[
+      {n:'Current Ratio',          v:nf(m.currentRatioAnnual??m.currentRatioQuarterly)},
+      {n:'Quick Ratio',            v:nf(m.quickRatioAnnual??m.quickRatioQuarterly)},
+      {n:'Debt / Equity',          v:nf(m['totalDebt/totalEquityAnnual']??m['totalDebt/totalEquityQuarterly'])},
+      {n:'LT Debt / Equity',       v:nf(m['longTermDebt/equityAnnual']??m['longTermDebt/equityQuarterly'])},
+      {n:'Free Cash Flow',         v:mf(m.freeCashFlowTTM??m.freeCashFlowAnnual)},
+      {n:'Interest Coverage',      v:nf(m.netInterestCoverageTTM??m.netInterestCoverageAnnual)},
+    ]},
+    { title:'📋 Per Share', items:[
+      {n:'EPS (TTM)',              v:`$${nf(m.epsExclExtraItemsTTM??m.epsTTM??m.epsNormalizedAnnual,2)}`},
+      {n:'Book Value / Share',     v:`$${nf(m.bookValuePerShareAnnual,2)}`},
+      {n:'FCF / Share',            v:`$${nf(m.freeCashFlowPerShareTTM??m.cashFlowPerShareTTM,2)}`},
+      {n:'Revenue / Share',        v:`$${nf(m.revenuePerShareTTM??m.salesPerShareTTM,2)}`},
+      {n:'Cash / Share',           v:`$${nf(m.cashPerSharePerShareAnnual,2)}`},
+    ]},
+    { title:'💵 Dividends', items:[
+      {n:'Dividend Yield',         v:pf(m.dividendYieldIndicatedAnnual??m.currentDividendYieldTTM)},
+      {n:'Dividend / Share',       v:`$${nf(m.dividendPerShareAnnual,2)}`},
+      {n:'Payout Ratio',           v:pf(m.payoutRatioAnnual??m.payoutRatioTTM)},
+      {n:'Dividend Growth (5Y)',   v:pf(m.dividendGrowthRate5Y)},
+    ]},
+    { title:'📉 Returns & Trading', items:[
+      {n:'YTD Return',             v:pf(m.yearToDatePriceReturnDaily)},
+      {n:'52W Return',             v:pf(m['52WeekPriceReturnDaily'])},
+      {n:'26W Return',             v:pf(m['26WeekPriceReturnDaily'])},
+      {n:'13W Return',             v:pf(m['13WeekPriceReturnDaily'])},
+      {n:'Avg Volume (10D)',        v:m['10DayAverageTradingVolume']!=null?`${m['10DayAverageTradingVolume'].toFixed(2)}M`:'—'},
+      {n:'Avg Volume (3M)',         v:m['3MonthAverageTradingVolume']!=null?`${m['3MonthAverageTradingVolume'].toFixed(2)}M`:'—'},
+    ]},
+  ];
+
+  return (
+    <div className="section-card" style={{marginBottom:16}}>
+      <h2>📊 Financial Details</h2>
+
+      {/* Top 10 key parameters */}
+      <div style={{marginBottom:4}}>
+        <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:8}}>
+          ⭐ Key Parameters (Score Drivers)
+        </div>
+        <div className="fin-grid">
+          {keyParams.map((item,i)=>(
+            <div key={i} className="fin-item fin-key">
+              <span className="fn">{item.n}</span>
+              <span className="fv" style={{color:item.v==='—'?'#475569':'#e2e8f0'}}>{item.v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Expandable full metrics */}
+      <button className="fin-toggle" onClick={()=>setExpanded(!expanded)}>
+        <span>All Financial Parameters</span>
+        <span style={{fontSize:'.8rem'}}>{expanded ? '▲ Hide' : '▼ Show all'}</span>
+      </button>
+
+      {expanded && (
+        <div>
+          {categories.map((cat,ci)=>(
+            <div key={ci} className="fin-category">
+              <div className="fin-cat-title">{cat.title}</div>
+              <div className="fin-grid">
+                {cat.items.map((item,ii)=>(
+                  <div key={ii} className="fin-item">
+                    <span className="fn">{item.n}</span>
+                    <span className="fv" style={{color:item.v==='—'||item.v==='$—'?'#475569':'#e2e8f0'}}>{item.v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Key setup screen ───────────────────────────────────────────────── */
 function KeyScreen({onSave}){
   const [k,setK] = useState('');
   return (
@@ -581,23 +960,18 @@ function KeyScreen({onSave}){
       <div className="card">
         <div style={{fontSize:'1rem',fontWeight:700,color:'#e2e8f0',marginBottom:6}}>Get your free Finnhub API key</div>
         <div style={{fontSize:'.85rem',color:'#94a3b8',marginBottom:14,lineHeight:1.6}}>
-          Unlike the old service, Finnhub allows <strong style={{color:'#4ade80'}}>60 requests/minute</strong> with no harsh daily limit. Free forever.
+          Finnhub allows <strong style={{color:'#4ade80'}}>60 requests/minute</strong> with no harsh daily limit. Free forever.
         </div>
         <div className="key-steps">
           <div className="key-step"><span className="num">1</span><span>Go to <a href="https://finnhub.io" target="_blank">finnhub.io</a> and click <strong>"Get free API key"</strong></span></div>
           <div className="key-step"><span className="num">2</span><span>Sign up with any email (takes 60 seconds)</span></div>
           <div className="key-step"><span className="num">3</span><span>Copy your API key from the dashboard and paste it below</span></div>
         </div>
-        <input
-          className="key-input"
-          placeholder="Paste your Finnhub API key here…"
-          value={k}
+        <input className="key-input" placeholder="Paste your Finnhub API key here…" value={k}
           onChange={e=>setK(e.target.value.trim())}
-          onKeyDown={e=>{ if(e.key==='Enter'&&k.length>5){ saveKey(k); onSave(k); } }}
-        />
+          onKeyDown={e=>{ if(e.key==='Enter'&&k.length>5){ saveKey(k); onSave(k); } }}/>
         <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}>
-          <button className="btn btn-primary" disabled={k.length<5}
-            onClick={()=>{ saveKey(k); onSave(k); }}>
+          <button className="btn btn-primary" disabled={k.length<5} onClick={()=>{ saveKey(k); onSave(k); }}>
             Save &amp; Start Analyzing →
           </button>
         </div>
@@ -607,27 +981,22 @@ function KeyScreen({onSave}){
   );
 }
 
-/* ── Home screen ─────────────────────────────────────────────────── */
+/* ── Home screen ────────────────────────────────────────────────────── */
 function HomeScreen({state,dispatch,apiKey,onResetKey}){
   const [cached,setCached]=useState(false);
-
   const onChange = e=>{
     const v=e.target.value.replace(/[^A-Za-z.]/g,'').toUpperCase();
     dispatch({type:'TICKER',v});
     setCached(v.length>0&&isCached(v));
   };
-
   const doAnalyze = async()=>{
     if(!state.ticker.trim()) return;
     dispatch({type:'LOAD'});
     try {
       const r = await analyze(state.ticker.trim(), apiKey);
       dispatch({type:'DONE',v:r});
-    } catch(e) {
-      dispatch({type:'ERR',v:e.message});
-    }
+    } catch(e) { dispatch({type:'ERR',v:e.message}); }
   };
-
   return (
     <div>
       <div className="header">
@@ -664,18 +1033,18 @@ function HomeScreen({state,dispatch,apiKey,onResetKey}){
   );
 }
 
-/* ── Loading screen ─────────────────────────────────────────────── */
+/* ── Loading screen ─────────────────────────────────────────────────── */
 function LoadingScreen({ticker}){
   return (
     <div className="loading">
       <div className="spinner"></div>
       <div style={{color:'#94a3b8'}}>Analyzing <strong style={{color:'#38bdf8'}}>{ticker}</strong>…</div>
-      <div style={{color:'#475569',fontSize:'.8rem',marginTop:8}}>Fetching fundamentals, news &amp; insider activity</div>
+      <div style={{color:'#475569',fontSize:'.8rem',marginTop:8}}>Fetching fundamentals, technicals &amp; insider activity</div>
     </div>
   );
 }
 
-/* ── Error screen ─────────────────────────────────────────────── */
+/* ── Error screen ───────────────────────────────────────────────────── */
 function ErrorScreen({error,dispatch}){
   return (
     <div>
@@ -690,7 +1059,7 @@ function ErrorScreen({error,dispatch}){
   );
 }
 
-/* ── Results screen ─────────────────────────────────────────────── */
+/* ── Results screen ─────────────────────────────────────────────────── */
 function ResultsScreen({r,dispatch}){
   const up = r.chgPct>=0;
   return (
@@ -748,7 +1117,10 @@ function ResultsScreen({r,dispatch}){
         </div>
       </div>
 
-      {/* Metrics */}
+      {/* Technical Analysis — NEW */}
+      <TechnicalsSection tech={r.technicals} price={r.price} />
+
+      {/* Quick metrics */}
       <div className="info-grid">
         <div className="info-item"><div className="label">Market Cap</div><div className="value">{r.mktCap?fmt(r.mktCap):'—'}</div></div>
         <div className="info-item"><div className="label">P/E Ratio</div><div className="value">{r.pe?r.pe.toFixed(1):'—'}</div></div>
@@ -757,6 +1129,9 @@ function ResultsScreen({r,dispatch}){
         <div className="info-item"><div className="label">EPS (TTM)</div><div className="value">{r.eps?`$${r.eps.toFixed(2)}`:'—'}</div></div>
         <div className="info-item"><div className="label">Day Change</div><div className="value" style={{color:r.chgPct>=0?'#4ade80':'#f87171'}}>{r.chgPct>=0?'+':''}{r.chgPct.toFixed(2)}%</div></div>
       </div>
+
+      {/* Financial Details — NEW */}
+      <FinancialDetailsSection m={r.rawMetric} />
 
       {/* Whale / Insider */}
       {(r.f8details.whales.length>0||r.f8details.insiders.length>0)&&(
@@ -838,22 +1213,12 @@ function ResultsScreen({r,dispatch}){
   );
 }
 
-/* ── App root ─────────────────────────────────────────────────────── */
+/* ── App root ───────────────────────────────────────────────────────── */
 function App(){
   const [apiKey, setApiKey] = useState(()=>getKey());
   const [state,dispatch]    = useReducer(reducer, INIT);
 
   if (!apiKey) return <KeyScreen onSave={k=>{saveKey(k); setApiKey(k);}}/>;
-
-  const doAnalyze = async(ticker)=>{
-    dispatch({type:'LOAD'});
-    try {
-      const r = await analyze(ticker, apiKey);
-      dispatch({type:'DONE',v:r});
-    } catch(e) {
-      dispatch({type:'ERR',v:e.message});
-    }
-  };
 
   return (
     <div className="app">
