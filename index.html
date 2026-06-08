@@ -529,25 +529,25 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
   const price  = currentPrice;
   m = m || {};
 
-  // ── Metric-based indicators (always available) ──
+  // ── Always-available metric data ──
   const hi52 = m['52WeekHigh'];
   const lo52 = m['52WeekLow'];
 
-  // 52-week range position
+  // 52-week range position slider
   let rangePos = null;
   if (hi52 && lo52 && price && hi52 > lo52) {
     const pct = Math.max(0, Math.min(1, (price-lo52)/(hi52-lo52)));
     const zones = [
-      {max:0.20,label:'📉 Near 52-Wk Low',  detail:'At low end of annual range — potential value zone',   color:'#4ade80',zone:'bottom'},
-      {max:0.40,label:'⬇️ Lower Range',      detail:'Below midpoint of 52-week range',                     color:'#86efac',zone:'lower'},
-      {max:0.60,label:'➡️ Mid Range',        detail:'Near middle of 52-week range — neutral',              color:'#fde047',zone:'middle'},
-      {max:0.80,label:'⬆️ Upper Range',      detail:'Above midpoint of 52-week range',                     color:'#fbbf24',zone:'upper'},
-      {max:1.00,label:'📈 Near 52-Wk High', detail:'At high end of annual range — exercise caution',      color:'#f87171',zone:'top'},
+      {max:0.20,label:'📉 Near 52-Wk Low',  detail:'At low end of annual range — potential value zone',   color:'#4ade80'},
+      {max:0.40,label:'⬇️ Lower Range',      detail:'Below midpoint of 52-week range',                     color:'#86efac'},
+      {max:0.60,label:'➡️ Mid Range',        detail:'Near middle of 52-week range — neutral',              color:'#fde047'},
+      {max:0.80,label:'⬆️ Upper Range',      detail:'Above midpoint of 52-week range',                     color:'#fbbf24'},
+      {max:1.00,label:'📈 Near 52-Wk High', detail:'At high end of annual range — exercise caution',      color:'#f87171'},
     ];
     rangePos = {...(zones.find(z=>pct<=z.max)||zones[4]), pct:Math.round(pct*100)};
   }
 
-  // Volume momentum from metric (10D avg vs 3M avg — both in millions)
+  // Volume from metrics
   let vol = null;
   const v10 = m['10DayAverageTradingVolume'];
   const v3m = m['3MonthAverageTradingVolume'];
@@ -561,7 +561,7 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
     };
   }
 
-  // Price performance from metric
+  // Price returns
   const ret = {
     w13: m['13WeekPriceReturnDaily'],
     w26: m['26WeekPriceReturnDaily'],
@@ -569,62 +569,85 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
     ytd: m['yearToDatePriceReturnDaily'],
   };
 
-  const support    = lo52 || null;
-  const resistance = hi52 || null;
-
-  // ── Candle-based swing S&R (bonus when available) ──
-  // Accept data even if s !== 'ok' — Finnhub sometimes returns 'no_data' status with valid prices
-  const rawC = daily?.c || [];
-  const validCloses = rawC.filter(v => v && v > 0);
-  if (validCloses.length < 6) {
-    return {rangePos, vol, ret, swingLevels:null, bb:null, bbPos:null, metricOnly:true};
+  // ── Moving Average ESTIMATES from price returns (always shown) ──
+  // Logic: MA(N) ≈ midpoint between current price and price N periods ago
+  // Price N weeks ago = current / (1 + returnPct/100)
+  let ma20 = null, ma50 = null, ma200 = null;
+  if (price > 0) {
+    const r13 = ret.w13, r52 = ret.w52;
+    if (r52 != null) {
+      const p52ago = price / (1 + r52/100);
+      ma200 = (price + p52ago) / 2;
+    }
+    if (r13 != null) {
+      const p13ago = price / (1 + r13/100);
+      ma50 = (price + p13ago) / 2;
+      // 20 DMA ≈ 4/13 of the 13-week move
+      const r4w = r13 * (4/13);
+      const p4ago = price / (1 + r4w/100);
+      ma20 = (price + p4ago) / 2;
+    }
   }
 
+  const maSignal = (ma, lbl, exact) => ma ? {
+    val: ma,
+    label: price > ma
+      ? `Trading ABOVE ${lbl} ($${ma.toFixed(2)}) ✓`
+      : `Trading BELOW ${lbl} ($${ma.toFixed(2)}) ⚠️`,
+    short: price > ma ? 'Above ✓' : 'Below ⚠️',
+    color: price > ma ? '#4ade80' : '#f87171',
+    exact,
+  } : null;
+
+  // ── Try candle-based exact data ──
+  const rawC = daily?.c || [];
+  const validCloses = rawC.filter(v => v && v > 0);
+  const hasCandles  = validCloses.length >= 20;
+
+  if (!hasCandles) {
+    // Return with estimated MAs (always useful) and no BB/swingLevels
+    return {
+      rangePos, vol, ret,
+      swingLevels: null, bb: null, bbPos: null,
+      s20:  maSignal(ma20,  '20 DMA',  false),
+      s50:  maSignal(ma50,  '50 DMA',  false),
+      s200: maSignal(ma200, '200 DMA', false),
+      ma20, ma50, ma200,
+      approxMA: true, metricOnly: true,
+    };
+  }
+
+  // ── Exact candle-based calculations ──
   const closes  = validCloses;
-  const rawH = daily.h || [];
-  const rawL = daily.l || [];
-  const highs   = rawH.filter(v=>v&&v>0).length >= 6 ? rawH.filter(v=>v&&v>0) : closes;
-  const lows    = rawL.filter(v=>v&&v>0).length >= 6 ? rawL.filter(v=>v&&v>0) : closes;
+  const rawH    = (daily.h || []).filter(v=>v&&v>0);
+  const rawL    = (daily.l || []).filter(v=>v&&v>0);
+  const highs   = rawH.length >= 6 ? rawH : closes;
+  const lows    = rawL.length >= 6 ? rawL : closes;
   const volumes = daily.v || [];
   const n       = closes.length;
 
-  // Moving Averages
-  const ma20  = n >= 20  ? sma(closes, 20)              : null;
-  const ma50  = n >= 50  ? sma(closes, 50)              : null;
-  const ma200 = n >= 100 ? sma(closes, Math.min(200,n)) : null;
-
-  const maSignal = (ma, lbl) => ma ? {
-    val: ma,
-    label: price > ma
-      ? `Stock trading ABOVE ${lbl} ($${ma.toFixed(2)}) ✓`
-      : `Stock trading BELOW ${lbl} ($${ma.toFixed(2)}) ⚠️`,
-    short: price > ma ? 'Above ✓' : 'Below ⚠️',
-    color: price > ma ? '#4ade80' : '#f87171'
-  } : null;
-  const s20  = maSignal(ma20,  '20 DMA');
-  const s50  = maSignal(ma50,  '50 DMA');
-  const s200 = maSignal(ma200, '200 DMA');
+  const ma20x  = n >= 20  ? sma(closes, 20)              : ma20;
+  const ma50x  = n >= 50  ? sma(closes, 50)              : ma50;
+  const ma200x = n >= 100 ? sma(closes, Math.min(200,n)) : ma200;
 
   // Bollinger Bands — 20-day
   let bb = null, bbPos = null;
-  if (n >= 20) {
-    const sl   = closes.slice(-20);
-    const mean = sl.reduce((a,b)=>a+b,0)/20;
-    const std  = Math.sqrt(sl.reduce((a,b)=>a+Math.pow(b-mean,2),0)/20);
-    bb = {upper:mean+2*std, middle:mean, lower:mean-2*std};
-    const range = bb.upper - bb.lower;
-    const pct   = range>0 ? Math.max(0,Math.min(1,(price-bb.lower)/range)) : 0.5;
-    const zones = [
-      {max:0.15,label:'📉 Lower Band',  detail:'Potentially oversold — watch for reversal', color:'#4ade80',zone:'bottom'},
-      {max:0.40,label:'⬇️ Lower Half',  detail:'Below midpoint — momentum building possible',color:'#86efac',zone:'lower'},
-      {max:0.60,label:'➡️ Middle Band', detail:'At 20-day average — neutral',               color:'#fde047',zone:'middle'},
-      {max:0.85,label:'⬆️ Upper Half',  detail:'Above midpoint — momentum intact',           color:'#fbbf24',zone:'upper'},
-      {max:1.00,label:'📈 Upper Band',  detail:'Potentially overbought — caution on entries',color:'#f87171',zone:'top'},
-    ];
-    bbPos = {...(zones.find(z=>pct<=z.max)||zones[4]), pct:Math.round(pct*100)};
-  }
+  const sl   = closes.slice(-20);
+  const mean = sl.reduce((a,b)=>a+b,0)/sl.length;
+  const std  = Math.sqrt(sl.reduce((a,b)=>a+Math.pow(b-mean,2),0)/sl.length);
+  bb = {upper:mean+2*std, middle:mean, lower:mean-2*std};
+  const bbRange = bb.upper - bb.lower;
+  const bbPct   = bbRange>0 ? Math.max(0,Math.min(1,(price-bb.lower)/bbRange)) : 0.5;
+  const bbZones = [
+    {max:0.15,label:'📉 Lower Band',  detail:'Potentially oversold — watch for reversal', color:'#4ade80'},
+    {max:0.40,label:'⬇️ Lower Half',  detail:'Below midpoint — momentum building possible',color:'#86efac'},
+    {max:0.60,label:'➡️ Middle Band', detail:'At 20-day average — neutral',               color:'#fde047'},
+    {max:0.85,label:'⬆️ Upper Half',  detail:'Above midpoint — momentum intact',           color:'#fbbf24'},
+    {max:1.00,label:'📈 Upper Band',  detail:'Potentially overbought — caution on entries',color:'#f87171'},
+  ];
+  bbPos = {...(bbZones.find(z=>bbPct<=z.max)||bbZones[4]), pct:Math.round(bbPct*100)};
 
-  // Volume from candles (override metric-based if available)
+  // Volume from candles
   if (volumes.length >= 5) {
     const avg = sma(volumes.slice(0,-1), Math.min(20, volumes.length-1));
     const cur = volumes[volumes.length-1];
@@ -639,10 +662,16 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
     }
   }
 
-  // Swing-based Support & Resistance from chart data
   const swingLevels = findSwingLevels(highs, lows, price);
 
-  return {rangePos, vol, ret, swingLevels, bb, bbPos, s20, s50, s200, ma20, ma50, ma200, metricOnly:false};
+  return {
+    rangePos, vol, ret, swingLevels, bb, bbPos,
+    s20:  maSignal(ma20x,  '20 DMA',  true),
+    s50:  maSignal(ma50x,  '50 DMA',  true),
+    s200: maSignal(ma200x, '200 DMA', true),
+    ma20: ma20x, ma50: ma50x, ma200: ma200x,
+    approxMA: false, metricOnly: false,
+  };
 }
 
 /* ── Analyse ────────────────────────────────────────────────────────── */
@@ -803,8 +832,8 @@ function TechnicalsSection({tech, price, onRetryChart}) {
         </div>
       )}
 
-      {/* Bollinger Band slider + Moving Averages — when candle data available */}
-      {tech.bb && tech.bbPos ? (
+      {/* Bollinger Bands — only when exact candle data available */}
+      {tech.bb && tech.bbPos && (
         <div style={{marginBottom:14}}>
           <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:6}}>
             Bollinger Bands (20-day) — Where is it trading?
@@ -819,9 +848,17 @@ function TechnicalsSection({tech, price, onRetryChart}) {
             <span>Upper {fmtP(tech.bb.upper)}</span>
           </div>
           <div style={{fontSize:'.72rem',color:'#64748b',marginTop:3,textAlign:'center'}}>{tech.bbPos.detail} · Mid Band: {fmtP(tech.bb.middle)}</div>
+        </div>
+      )}
 
-          {/* Moving Averages — full sentence style */}
-          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:7}}>
+      {/* Moving Averages — always shown (exact when candle loads, estimated from returns otherwise) */}
+      {(tech.ma20||tech.ma50||tech.ma200) && (
+        <div style={{marginBottom:14}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+            <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Moving Averages</div>
+            {tech.approxMA && <div style={{fontSize:'.6rem',color:'#334155',background:'#1e293b',padding:'2px 6px',borderRadius:4}}>estimated from returns</div>}
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:7}}>
             {[
               {label:'20 DMA',  sig:tech.s20,  val:tech.ma20},
               {label:'50 DMA',  sig:tech.s50,  val:tech.ma50},
@@ -836,26 +873,14 @@ function TechnicalsSection({tech, price, onRetryChart}) {
               </div>
             ))}
           </div>
-        </div>
-      ) : (
-        <div style={{background:'#0f172a',borderRadius:10,padding:'14px',marginBottom:12,textAlign:'center',border:'1px solid #1e293b'}}>
-          <div style={{color:'#64748b',fontSize:'.8rem',marginBottom:6}}>📊 Chart Data Not Loaded</div>
-          <div style={{color:'#475569',fontSize:'.72rem',lineHeight:1.5,marginBottom:10}}>
-            Bollinger Bands · Moving Averages · Support &amp; Resistance
-          </div>
-          {onRetryChart && (
-            <button
-              onClick={handleRetry}
-              disabled={chartLoading}
-              style={{
-                background:chartLoading?'#1e293b':'linear-gradient(135deg,#0ea5e9,#6366f1)',
-                border:'none',borderRadius:8,color:'#fff',padding:'8px 18px',
-                fontSize:'.8rem',fontWeight:700,cursor:chartLoading?'default':'pointer',opacity:chartLoading?0.6:1
-              }}>
-              {chartLoading ? '⏳ Loading chart data…' : '🔄 Load Chart Data'}
-            </button>
+          {tech.approxMA && onRetryChart && (
+            <div style={{marginTop:8,textAlign:'center'}}>
+              <button onClick={handleRetry} disabled={chartLoading} style={{background:'none',border:'1px solid #334155',borderRadius:6,color:'#64748b',padding:'5px 12px',fontSize:'.7rem',cursor:'pointer'}}>
+                {chartLoading ? '⏳ Loading exact values…' : '🔄 Load exact chart values'}
+              </button>
+              {chartErr && <div style={{color:'#f87171',fontSize:'.68rem',marginTop:4}}>{chartErr}</div>}
+            </div>
           )}
-          {chartErr && <div style={{color:'#f87171',fontSize:'.72rem',marginTop:8}}>{chartErr}</div>}
         </div>
       )}
 
