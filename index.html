@@ -302,23 +302,28 @@ async function fetchAll(rawTicker, apiKey) {
     metric = result.metric;
   }
 
-  // Optional fetches — fail silently
-  const [newsRes, insiderRes] = await Promise.all([
+  // Optional fetches — all run in parallel, fail silently
+  const now2  = Math.floor(Date.now()/1000);
+  const fromC = now2 - 210*24*60*60; // 210 days — enough for 200 DMA
+  const candleUrl = `${FH}/stock/candle?symbol=${sym}&resolution=D&from=${fromC}&to=${now2}&${t}`;
+
+  const [newsRes, insiderRes, candleRes] = await Promise.all([
     safeFetch(`${FH}/company-news?symbol=${sym}&from=${from}&to=${today}&${t}`).catch(()=>null),
     safeFetch(`${FH}/stock/insider-transactions?symbol=${sym}&${t}`).catch(()=>null),
+    safeFetch(candleUrl, 12000).catch(()=>null),
   ]);
   const news    = newsRes    ? await newsRes.json().catch(()=>[])             : [];
   const insider = insiderRes ? await insiderRes.json().catch(()=>({data:[]})) : {data:[]};
-
-  // Candle data for technicals — optional, fail silently
-  const {daily, weekly} = await fetchCandles(sym, apiKey).catch(()=>({daily:null, weekly:null}));
+  const daily   = candleRes  ? await candleRes.json().catch(()=>null)         : null;
+  const weekly  = null;
 
   return {
     profile, metric,
     quote:   result.quote || {},
     news:    Array.isArray(news) ? news : [],
     insider: insider || {data:[]},
-    daily, weekly,
+    daily:   daily || null,
+    weekly:  null,
   };
 }
 
@@ -577,7 +582,24 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
   const volumes = daily.v || [];
   const n       = closes.length;
 
-  // Bollinger Bands — 20-day (if enough data)
+  // Moving Averages
+  const ma20  = n >= 20  ? sma(closes, 20)              : null;
+  const ma50  = n >= 50  ? sma(closes, 50)              : null;
+  const ma200 = n >= 100 ? sma(closes, Math.min(200,n)) : null;
+
+  const maSignal = (ma, lbl) => ma ? {
+    val: ma,
+    label: price > ma
+      ? `Stock trading ABOVE ${lbl} ($${ma.toFixed(2)}) ✓`
+      : `Stock trading BELOW ${lbl} ($${ma.toFixed(2)}) ⚠️`,
+    short: price > ma ? 'Above ✓' : 'Below ⚠️',
+    color: price > ma ? '#4ade80' : '#f87171'
+  } : null;
+  const s20  = maSignal(ma20,  '20 DMA');
+  const s50  = maSignal(ma50,  '50 DMA');
+  const s200 = maSignal(ma200, '200 DMA');
+
+  // Bollinger Bands — 20-day
   let bb = null, bbPos = null;
   if (n >= 20) {
     const sl   = closes.slice(-20);
@@ -614,7 +636,7 @@ function calculateTechnicals(daily, weekly, currentPrice, m) {
   // Swing-based Support & Resistance from chart data
   const swingLevels = findSwingLevels(highs, lows, price);
 
-  return {rangePos, vol, ret, swingLevels, bb, bbPos, metricOnly:false};
+  return {rangePos, vol, ret, swingLevels, bb, bbPos, s20, s50, s200, ma20, ma50, ma200, metricOnly:false};
 }
 
 /* ── Analyse ────────────────────────────────────────────────────────── */
@@ -764,11 +786,11 @@ function TechnicalsSection({tech, price}) {
         </div>
       )}
 
-      {/* Bollinger Band visual — when candle data available */}
-      {tech.bb && tech.bbPos && (
+      {/* Bollinger Band slider + Moving Averages — when candle data available */}
+      {tech.bb && tech.bbPos ? (
         <div style={{marginBottom:14}}>
           <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:6}}>
-            Bollinger Bands (20-day)
+            Bollinger Bands (20-day) — Where is it trading?
           </div>
           <div style={{position:'relative',height:'6px',background:'#1e293b',borderRadius:999,margin:'10px 0 6px'}}>
             <div style={{position:'absolute',left:0,right:0,height:'100%',background:'linear-gradient(90deg,#4ade80 0%,#fde047 50%,#f87171 100%)',borderRadius:999,opacity:0.35}}></div>
@@ -776,10 +798,32 @@ function TechnicalsSection({tech, price}) {
           </div>
           <div style={{display:'flex',justifyContent:'space-between',fontSize:'.65rem',color:'#475569',marginTop:4}}>
             <span>Lower {fmtP(tech.bb.lower)}</span>
-            <span style={{color:tech.bbPos.color,fontWeight:700}}>{tech.bbPos.label}</span>
+            <span style={{color:tech.bbPos.color,fontWeight:800}}>{tech.bbPos.label}</span>
             <span>Upper {fmtP(tech.bb.upper)}</span>
           </div>
-          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:3,textAlign:'center'}}>{tech.bbPos.detail} · Mid: {fmtP(tech.bb.middle)}</div>
+          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:3,textAlign:'center'}}>{tech.bbPos.detail} · Mid Band: {fmtP(tech.bb.middle)}</div>
+
+          {/* Moving Averages — full sentence style */}
+          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:7}}>
+            {[
+              {label:'20 DMA',  sig:tech.s20,  val:tech.ma20},
+              {label:'50 DMA',  sig:tech.s50,  val:tech.ma50},
+              {label:'200 DMA', sig:tech.s200, val:tech.ma200},
+            ].filter(x=>x.val).map(({label,sig,val},i)=>(
+              <div key={i} style={{background:'#0f172a',borderRadius:10,padding:'10px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+                <div>
+                  <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>{label}</div>
+                  <div style={{fontSize:'.82rem',color:sig?.color||'#94a3b8',fontWeight:600,marginTop:2}}>{sig?.label||'—'}</div>
+                </div>
+                <div style={{fontSize:'1rem',fontWeight:800,color:'#e2e8f0',flexShrink:0}}>{fmtP(val)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div style={{background:'#0f172a',borderRadius:10,padding:'10px 14px',marginBottom:12,textAlign:'center'}}>
+          <div style={{color:'#475569',fontSize:'.78rem'}}>📊 Bollinger Bands &amp; Moving Averages loading…</div>
+          <div style={{color:'#334155',fontSize:'.7rem',marginTop:3}}>Fetching 200 days of price history</div>
         </div>
       )}
 
