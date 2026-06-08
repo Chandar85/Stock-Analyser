@@ -226,19 +226,41 @@ function sma(arr, period) {
   return s.reduce((a,b)=>a+b, 0) / p;
 }
 
-/* ── Candle fetch for technicals ────────────────────────────────────── */
+/* ── Candle fetch — 30 days only for S&R calculation ───────────────── */
 async function fetchCandles(sym, apiKey) {
   const t = `token=${apiKey}`;
-  const now = Math.floor(Date.now()/1000);
-  const from200d = now - 220*24*60*60;
-  const from200w = now - 210*7*24*60*60;
-  const [dr, wr] = await Promise.all([
-    safeFetch(`${FH}/stock/candle?symbol=${sym}&resolution=D&from=${from200d}&to=${now}&${t}`, 15000).catch(()=>null),
-    safeFetch(`${FH}/stock/candle?symbol=${sym}&resolution=W&from=${from200w}&to=${now}&${t}`, 15000).catch(()=>null),
-  ]);
-  const daily  = dr ? await dr.json().catch(()=>null) : null;
-  const weekly = wr ? await wr.json().catch(()=>null) : null;
-  return {daily, weekly};
+  const now  = Math.floor(Date.now()/1000);
+  const from = now - 35*24*60*60; // 35 days buffer → ~25 trading days
+  const dr = await safeFetch(`${FH}/stock/candle?symbol=${sym}&resolution=D&from=${from}&to=${now}&${t}`, 12000).catch(()=>null);
+  const daily = dr ? await dr.json().catch(()=>null) : null;
+  return {daily, weekly:null};
+}
+
+/* ── Swing S&R from OHLC data ────────────────────────────────────────── */
+function findSwingLevels(highs, lows, currentPrice) {
+  const swingHighs = [], swingLows = [];
+  const lb = 2; // look 2 bars each side
+  for (let i=lb; i<highs.length-lb; i++) {
+    const h = highs[i];
+    const l = lows[i];
+    if (h > Math.max(...highs.slice(i-lb,i), ...highs.slice(i+1,i+lb+1))) swingHighs.push(h);
+    if (l < Math.min(...lows.slice(i-lb,i),  ...lows.slice(i+1,i+lb+1)))  swingLows.push(l);
+  }
+  // Cluster levels within 0.5% of each other, take strongest
+  const cluster = (arr) => {
+    const sorted = [...new Set(arr.map(v=>Math.round(v*100)/100))].sort((a,b)=>a-b);
+    const out = [];
+    for (const v of sorted) {
+      if (!out.length || v > out[out.length-1]*1.005) out.push(v);
+    }
+    return out;
+  };
+  const resistances = cluster(swingHighs.filter(v=>v>currentPrice)).slice(0,2);
+  const supports    = cluster(swingLows.filter(v=>v<currentPrice)).reverse().slice(0,2);
+  return {
+    r1: resistances[0]||null, r2: resistances[1]||null,
+    s1: supports[0]||null,    s2: supports[1]||null,
+  };
 }
 
 /* ── Main data fetch ────────────────────────────────────────────────── */
@@ -497,105 +519,102 @@ function scoreF8(profile, news, insider) {
 }
 
 /* ── Calculate Technicals ───────────────────────────────────────────── */
-function calculateTechnicals(daily, weekly, currentPrice) {
-  if (!daily || daily.s !== 'ok' || !daily.c || daily.c.length < 20) return null;
+function calculateTechnicals(daily, weekly, currentPrice, m) {
+  const price  = currentPrice;
+  m = m || {};
+
+  // ── Metric-based indicators (always available) ──
+  const hi52 = m['52WeekHigh'];
+  const lo52 = m['52WeekLow'];
+
+  // 52-week range position
+  let rangePos = null;
+  if (hi52 && lo52 && price && hi52 > lo52) {
+    const pct = Math.max(0, Math.min(1, (price-lo52)/(hi52-lo52)));
+    const zones = [
+      {max:0.20,label:'📉 Near 52-Wk Low',  detail:'At low end of annual range — potential value zone',   color:'#4ade80',zone:'bottom'},
+      {max:0.40,label:'⬇️ Lower Range',      detail:'Below midpoint of 52-week range',                     color:'#86efac',zone:'lower'},
+      {max:0.60,label:'➡️ Mid Range',        detail:'Near middle of 52-week range — neutral',              color:'#fde047',zone:'middle'},
+      {max:0.80,label:'⬆️ Upper Range',      detail:'Above midpoint of 52-week range',                     color:'#fbbf24',zone:'upper'},
+      {max:1.00,label:'📈 Near 52-Wk High', detail:'At high end of annual range — exercise caution',      color:'#f87171',zone:'top'},
+    ];
+    rangePos = {...(zones.find(z=>pct<=z.max)||zones[4]), pct:Math.round(pct*100)};
+  }
+
+  // Volume momentum from metric (10D avg vs 3M avg — both in millions)
+  let vol = null;
+  const v10 = m['10DayAverageTradingVolume'];
+  const v3m = m['3MonthAverageTradingVolume'];
+  if (v10 && v3m && v3m > 0) {
+    const r = v10 / v3m;
+    vol = {
+      current: v10*1e6, avg: v3m*1e6, ratio: r,
+      label:  r>=2.0?'🔥🔥 Extreme Volume':r>=1.5?'🔥 High Momentum':r>=0.7?'➡️ Normal Volume':'⬇️ Low Volume',
+      color:  r>=1.5?'#4ade80':r>=0.7?'#94a3b8':'#f87171',
+      signal: r>=1.5?'high':r>=0.7?'neutral':'low',
+    };
+  }
+
+  // Price performance from metric
+  const ret = {
+    w13: m['13WeekPriceReturnDaily'],
+    w26: m['26WeekPriceReturnDaily'],
+    w52: m['52WeekPriceReturnDaily'],
+    ytd: m['yearToDatePriceReturnDaily'],
+  };
+
+  const support    = lo52 || null;
+  const resistance = hi52 || null;
+
+  // ── Candle-based swing S&R (bonus when available) ──
+  if (!daily || daily.s !== 'ok' || !daily.c || daily.c.length < 6) {
+    return {rangePos, vol, ret, swingLevels:null, bb:null, bbPos:null, metricOnly:true};
+  }
+
   const closes  = daily.c;
+  const highs   = daily.h || closes;
+  const lows    = daily.l || closes;
   const volumes = daily.v || [];
   const n       = closes.length;
-  const price   = currentPrice;
 
-  const ma50  = n >= 50  ? sma(closes, 50)              : null;
-  const ma200 = n >= 100 ? sma(closes, Math.min(200,n)) : null;
-  let ma200w = null;
-  if (weekly?.s==='ok' && weekly.c?.length > 10)
-    ma200w = sma(weekly.c, Math.min(200, weekly.c.length));
-
-  // Bollinger Bands — 20-day
-  let bb = null;
+  // Bollinger Bands — 20-day (if enough data)
+  let bb = null, bbPos = null;
   if (n >= 20) {
     const sl   = closes.slice(-20);
     const mean = sl.reduce((a,b)=>a+b,0)/20;
     const std  = Math.sqrt(sl.reduce((a,b)=>a+Math.pow(b-mean,2),0)/20);
     bb = {upper:mean+2*std, middle:mean, lower:mean-2*std};
-  }
-
-  // Bollinger position
-  let bbPos = null;
-  if (bb && price) {
     const range = bb.upper - bb.lower;
-    const pct   = range>0 ? Math.max(0, Math.min(1, (price-bb.lower)/range)) : 0.5;
+    const pct   = range>0 ? Math.max(0,Math.min(1,(price-bb.lower)/range)) : 0.5;
     const zones = [
-      {max:0.15,label:'📉 Lower Band',   detail:'Potentially oversold — watch for reversal entry',   color:'#4ade80', zone:'bottom'},
-      {max:0.40,label:'⬇️ Lower Half',   detail:'Below midpoint — building momentum possible',        color:'#86efac', zone:'lower'},
-      {max:0.60,label:'➡️ Middle Band',  detail:'At 20-day moving average — neutral territory',       color:'#fde047', zone:'middle'},
-      {max:0.85,label:'⬆️ Upper Half',   detail:'Above midpoint — momentum intact',                   color:'#fbbf24', zone:'upper'},
-      {max:1.00,label:'📈 Upper Band',   detail:'Potentially overbought — caution on new entries',    color:'#f87171', zone:'top'},
+      {max:0.15,label:'📉 Lower Band',  detail:'Potentially oversold — watch for reversal', color:'#4ade80',zone:'bottom'},
+      {max:0.40,label:'⬇️ Lower Half',  detail:'Below midpoint — momentum building possible',color:'#86efac',zone:'lower'},
+      {max:0.60,label:'➡️ Middle Band', detail:'At 20-day average — neutral',               color:'#fde047',zone:'middle'},
+      {max:0.85,label:'⬆️ Upper Half',  detail:'Above midpoint — momentum intact',           color:'#fbbf24',zone:'upper'},
+      {max:1.00,label:'📈 Upper Band',  detail:'Potentially overbought — caution on entries',color:'#f87171',zone:'top'},
     ];
     bbPos = {...(zones.find(z=>pct<=z.max)||zones[4]), pct:Math.round(pct*100)};
   }
 
-  // MA signals
-  const maSignal = (ma, lbl) => ma ? {
-    val:ma,
-    label: price>ma ? `Above ${lbl} ✓` : `Below ${lbl} ⚠️`,
-    color: price>ma ? '#4ade80' : '#f87171'
-  } : null;
-  const s50   = maSignal(ma50,  '50 DMA');
-  const s200  = maSignal(ma200, '200 DMA');
-  const s200w = maSignal(ma200w,'200 WMA');
-
-  // Golden / Death cross
-  let cross = null;
-  if (n >= 55 && ma50 && ma200) {
-    const pm50  = sma(closes.slice(0,-5), 50);
-    const pm200 = sma(closes.slice(0,-5), Math.min(200, n-5));
-    if (pm50 && pm200) {
-      if (pm50 < pm200 && ma50 > ma200)
-        cross = {label:'🟡 Golden Cross!', detail:'50 DMA just crossed ABOVE 200 DMA — very bullish signal', color:'#fde047'};
-      else if (pm50 > pm200 && ma50 < ma200)
-        cross = {label:'☠️ Death Cross!',  detail:'50 DMA just crossed BELOW 200 DMA — bearish warning',    color:'#f87171'};
-    }
-  }
-
-  // Volume Momentum
-  let vol = null;
-  if (volumes.length >= 10) {
-    const avg = sma(volumes.slice(0,-1), Math.min(30, volumes.length-1));
+  // Volume from candles (override metric-based if available)
+  if (volumes.length >= 5) {
+    const avg = sma(volumes.slice(0,-1), Math.min(20, volumes.length-1));
     const cur = volumes[volumes.length-1];
     if (avg && avg > 0) {
       const r = cur/avg;
       vol = {
         current:cur, avg, ratio:r,
-        label:  r>=2.0 ? '🔥🔥 Extreme Volume' : r>=1.5 ? '🔥 High Momentum' : r>=0.7 ? '➡️ Normal Volume' : '⬇️ Low Volume',
-        color:  r>=1.5 ? '#4ade80' : r>=0.7 ? '#94a3b8' : '#f87171',
-        signal: r>=1.5 ? 'high'    : r>=0.7 ? 'neutral' : 'low',
+        label:  r>=2.0?'🔥🔥 Extreme Volume':r>=1.5?'🔥 High Momentum':r>=0.7?'➡️ Normal Volume':'⬇️ Low Volume',
+        color:  r>=1.5?'#4ade80':r>=0.7?'#94a3b8':'#f87171',
+        signal: r>=1.5?'high':r>=0.7?'neutral':'low',
       };
     }
   }
 
-  // Support & Resistance (20-day price action)
-  const r20 = closes.slice(-20);
-  const support    = Math.min(...r20);
-  const resistance = Math.max(...r20);
+  // Swing-based Support & Resistance from chart data
+  const swingLevels = findSwingLevels(highs, lows, price);
 
-  // Power signal — how many of 5 signals are bullish?
-  const bullCount = [
-    s50?.color  === '#4ade80',
-    s200?.color === '#4ade80',
-    s200w?.color=== '#4ade80',
-    bbPos?.zone === 'bottom' || bbPos?.zone === 'lower',
-    vol?.signal === 'high',
-  ].filter(Boolean).length;
-
-  let power = null;
-  if (bullCount >= 5)
-    power = {label:'⚡ HIGH CONVICTION SETUP', detail:'All 5 signals align — above all MAs, near BB support, high volume', color:'#4ade80'};
-  else if (bullCount >= 4)
-    power = {label:'✅ Strong Setup',          detail:'4 of 5 signals bullish — very favorable entry conditions',          color:'#86efac'};
-  else if (bullCount >= 3)
-    power = {label:'🔍 Watch Closely',         detail:'3 of 5 signals building — setup developing',                       color:'#fde047'};
-
-  return {ma50, ma200, ma200w, s50, s200, s200w, bb, bbPos, cross, vol, support, resistance, power};
+  return {rangePos, vol, ret, swingLevels, bb, bbPos, metricOnly:false};
 }
 
 /* ── Analyse ────────────────────────────────────────────────────────── */
@@ -640,7 +659,7 @@ async function analyze(ticker, apiKey) {
     return {title:a.headline, url:a.url, sentiment, source:a.source};
   });
 
-  const technicals = calculateTechnicals(daily, weekly, price);
+  const technicals = calculateTechnicals(daily, weekly, price, m);
 
   return {
     symbol:  profile.ticker  || ticker.toUpperCase(),
@@ -701,88 +720,90 @@ function sentClass(s){
 
 /* ── Technical Analysis Section ─────────────────────────────────────── */
 function TechnicalsSection({tech, price}) {
-  if (!tech) return (
-    <div className="section-card" style={{marginBottom:16}}>
-      <h2>📈 Technical Analysis</h2>
-      <div style={{color:'#475569',fontSize:'.82rem',textAlign:'center',padding:'8px 0'}}>
-        Technical data unavailable for this symbol
-      </div>
-    </div>
-  );
+  if (!tech) return null;
 
-  const fmtP = v => v ? `$${v.toFixed(2)}` : '—';
+  const fmtP  = v => v ? `$${v.toFixed(2)}` : '—';
+  const fmtPct = v => v!=null ? `${v>=0?'+':''}${v.toFixed(1)}%` : '—';
+  const retColor = v => v==null?'#94a3b8':v>=0?'#4ade80':'#f87171';
 
   return (
     <div className="section-card" style={{marginBottom:16}}>
       <h2>📈 Technical Analysis</h2>
 
-      {/* Power signal */}
-      {tech.power && (
-        <div style={{background:'#0f172a',border:`1px solid ${tech.power.color}33`,borderRadius:10,padding:'10px 14px',marginBottom:10,textAlign:'center'}}>
-          <div style={{color:tech.power.color,fontWeight:800,fontSize:'.9rem'}}>{tech.power.label}</div>
-          <div style={{color:'#94a3b8',fontSize:'.73rem',marginTop:3}}>{tech.power.detail}</div>
+      {/* 52-week range position — always shown */}
+      {tech.rangePos && (
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:6}}>52-Week Range Position</div>
+          <div style={{position:'relative',height:'6px',background:'#1e293b',borderRadius:999,margin:'10px 0 6px'}}>
+            <div style={{position:'absolute',left:0,right:0,height:'100%',background:'linear-gradient(90deg,#4ade80 0%,#fde047 50%,#f87171 100%)',borderRadius:999,opacity:0.35}}></div>
+            <div style={{position:'absolute',left:`${tech.rangePos.pct}%`,top:'-5px',width:'16px',height:'16px',background:tech.rangePos.color,borderRadius:'50%',transform:'translateX(-50%)',boxShadow:`0 0 6px ${tech.rangePos.color}88`}}></div>
+          </div>
+          <div style={{display:'flex',justifyContent:'space-between',fontSize:'.65rem',color:'#475569',marginTop:4}}>
+            <span>Low {fmtP(tech.support)}</span>
+            <span style={{color:tech.rangePos.color,fontWeight:700}}>{tech.rangePos.label}</span>
+            <span>High {fmtP(tech.resistance)}</span>
+          </div>
+          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:3,textAlign:'center'}}>{tech.rangePos.detail}</div>
         </div>
       )}
 
-      {/* Golden / Death Cross */}
-      {tech.cross && (
-        <div style={{background:'#0f172a',border:`1px solid ${tech.cross.color}55`,borderRadius:10,padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:8}}>
-          <span style={{color:tech.cross.color,fontWeight:800,fontSize:'.85rem'}}>{tech.cross.label}</span>
-          <span style={{color:'#64748b',fontSize:'.73rem'}}>{tech.cross.detail}</span>
+      {/* Price performance — always shown */}
+      {(tech.ret?.w13!=null||tech.ret?.w26!=null||tech.ret?.w52!=null||tech.ret?.ytd!=null) && (
+        <div className="tech-grid" style={{marginBottom:12}}>
+          {[
+            {label:'13-Week Return',v:tech.ret?.w13},
+            {label:'26-Week Return',v:tech.ret?.w26},
+            {label:'52-Week Return',v:tech.ret?.w52},
+            {label:'YTD Return',    v:tech.ret?.ytd},
+          ].filter(x=>x.v!=null).map(({label,v},i)=>(
+            <div key={i} className="tech-item">
+              <div className="t-label">{label}</div>
+              <div className="t-value" style={{color:retColor(v)}}>{fmtPct(v)}</div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Bollinger Band visual */}
+      {/* Bollinger Band visual — when candle data available */}
       {tech.bb && tech.bbPos && (
         <div style={{marginBottom:14}}>
           <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:6}}>
-            Bollinger Bands (20-day) — Current position
+            Bollinger Bands (20-day)
           </div>
           <div style={{position:'relative',height:'6px',background:'#1e293b',borderRadius:999,margin:'10px 0 6px'}}>
             <div style={{position:'absolute',left:0,right:0,height:'100%',background:'linear-gradient(90deg,#4ade80 0%,#fde047 50%,#f87171 100%)',borderRadius:999,opacity:0.35}}></div>
-            <div style={{
-              position:'absolute',
-              left:`${tech.bbPos.pct}%`,
-              top:'-5px',
-              width:'16px',height:'16px',
-              background:tech.bbPos.color,
-              borderRadius:'50%',
-              transform:'translateX(-50%)',
-              boxShadow:`0 0 6px ${tech.bbPos.color}88`,
-            }}></div>
+            <div style={{position:'absolute',left:`${tech.bbPos.pct}%`,top:'-5px',width:'16px',height:'16px',background:tech.bbPos.color,borderRadius:'50%',transform:'translateX(-50%)',boxShadow:`0 0 6px ${tech.bbPos.color}88`}}></div>
           </div>
           <div style={{display:'flex',justifyContent:'space-between',fontSize:'.65rem',color:'#475569',marginTop:4}}>
             <span>Lower {fmtP(tech.bb.lower)}</span>
             <span style={{color:tech.bbPos.color,fontWeight:700}}>{tech.bbPos.label}</span>
             <span>Upper {fmtP(tech.bb.upper)}</span>
           </div>
-          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:4,textAlign:'center'}}>
-            {tech.bbPos.detail} · Mid: {fmtP(tech.bb.middle)}
-          </div>
+          <div style={{fontSize:'.72rem',color:'#64748b',marginTop:3,textAlign:'center'}}>{tech.bbPos.detail} · Mid: {fmtP(tech.bb.middle)}</div>
         </div>
       )}
 
-      {/* Moving Averages grid */}
-      <div className="tech-grid">
-        {[
-          {label:'50 DMA',   sig:tech.s50},
-          {label:'200 DMA',  sig:tech.s200},
-          {label:'200 WMA',  sig:tech.s200w},
-        ].filter(x=>x.sig).map(({label,sig},i)=>(
-          <div key={i} className="tech-item">
-            <div className="t-label">{label}</div>
-            <div className="t-value">{fmtP(sig.val)}</div>
-            <div className="t-sub" style={{color:sig.color}}>{sig.label}</div>
+      {/* Swing Support & Resistance from chart */}
+      {tech.swingLevels && (tech.swingLevels.s1||tech.swingLevels.r1) && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:8}}>
+            Support &amp; Resistance (Chart-based swing levels)
           </div>
-        ))}
-        {tech.bb && (
-          <div className="tech-item">
-            <div className="t-label">BB Middle (20D SMA)</div>
-            <div className="t-value">{fmtP(tech.bb.middle)}</div>
-            <div className="t-sub" style={{color:'#64748b'}}>20-day average</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            {[
+              {label:'Support 1 (S1)', v:tech.swingLevels.s1, color:'#4ade80'},
+              {label:'Resistance 1 (R1)', v:tech.swingLevels.r1, color:'#f87171'},
+              {label:'Support 2 (S2)', v:tech.swingLevels.s2, color:'#86efac'},
+              {label:'Resistance 2 (R2)', v:tech.swingLevels.r2, color:'#fca5a5'},
+            ].filter(x=>x.v).map(({label,v,color},i)=>(
+              <div key={i} style={{background:'#0f172a',borderRadius:10,padding:'10px 12px',border:`1px solid ${color}33`}}>
+                <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.06em'}}>{label}</div>
+                <div style={{color,fontWeight:800,fontSize:'1rem',marginTop:2}}>{fmtP(v)}</div>
+              </div>
+            ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Volume Momentum */}
       {tech.vol && (
@@ -791,30 +812,12 @@ function TechnicalsSection({tech, price}) {
             <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Volume Momentum</div>
             <div style={{color:tech.vol.color,fontWeight:700,fontSize:'.9rem',marginTop:2}}>{tech.vol.label}</div>
             <div style={{fontSize:'.72rem',color:'#64748b',marginTop:2}}>
-              Today {fmtVol(tech.vol.current)} vs 30-day avg {fmtVol(tech.vol.avg)}
+              10-day avg {fmtVol(tech.vol.current)} vs 3-month avg {fmtVol(tech.vol.avg)}
             </div>
           </div>
           <div style={{fontSize:'1.5rem',fontWeight:900,color:tech.vol.color,minWidth:40,textAlign:'right'}}>
             {tech.vol.ratio.toFixed(1)}x
           </div>
-        </div>
-      )}
-
-      {/* Support & Resistance */}
-      {(tech.support || tech.resistance) && (
-        <div style={{display:'flex',gap:8}}>
-          {tech.support && (
-            <div style={{flex:1,background:'#0f172a',borderRadius:10,padding:'10px 12px'}}>
-              <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Support (20D low)</div>
-              <div style={{color:'#4ade80',fontWeight:700,fontSize:'.9rem',marginTop:2}}>{fmtP(tech.support)}</div>
-            </div>
-          )}
-          {tech.resistance && (
-            <div style={{flex:1,background:'#0f172a',borderRadius:10,padding:'10px 12px'}}>
-              <div style={{fontSize:'.65rem',color:'#475569',textTransform:'uppercase',letterSpacing:'.08em'}}>Resistance (20D high)</div>
-              <div style={{color:'#f87171',fontWeight:700,fontSize:'.9rem',marginTop:2}}>{fmtP(tech.resistance)}</div>
-            </div>
-          )}
         </div>
       )}
     </div>
