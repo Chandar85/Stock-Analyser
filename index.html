@@ -302,18 +302,19 @@ async function fetchAll(rawTicker, apiKey) {
     metric = result.metric;
   }
 
-  // Optional fetches — all run in parallel, fail silently
-  const now2  = Math.floor(Date.now()/1000);
-  const fromC = now2 - 210*24*60*60; // 210 days — enough for 200 DMA
-  const candleUrl = `${FH}/stock/candle?symbol=${sym}&resolution=D&from=${fromC}&to=${now2}&${t}`;
-
-  const [newsRes, insiderRes, candleRes] = await Promise.all([
+  // Step 1: news + insider in parallel (fast, small responses)
+  const [newsRes, insiderRes] = await Promise.all([
     safeFetch(`${FH}/company-news?symbol=${sym}&from=${from}&to=${today}&${t}`).catch(()=>null),
     safeFetch(`${FH}/stock/insider-transactions?symbol=${sym}&${t}`).catch(()=>null),
-    safeFetch(candleUrl, 12000).catch(()=>null),
   ]);
   const news    = newsRes    ? await newsRes.json().catch(()=>[])             : [];
   const insider = insiderRes ? await insiderRes.json().catch(()=>({data:[]})) : {data:[]};
+
+  // Step 2: candle data separately — longer timeout (210 days = big payload)
+  const now2  = Math.floor(Date.now()/1000);
+  const fromC = now2 - 210*24*60*60; // 210 days — enough for 200 DMA
+  const candleUrl = `${FH}/stock/candle?symbol=${sym}&resolution=D&from=${fromC}&to=${now2}&${t}`;
+  const candleRes = await safeFetch(candleUrl, 20000).catch(()=>null);
   const daily   = candleRes  ? await candleRes.json().catch(()=>null)         : null;
   const weekly  = null;
 
@@ -821,9 +822,9 @@ function TechnicalsSection({tech, price}) {
           </div>
         </div>
       ) : (
-        <div style={{background:'#0f172a',borderRadius:10,padding:'10px 14px',marginBottom:12,textAlign:'center'}}>
-          <div style={{color:'#475569',fontSize:'.78rem'}}>📊 Bollinger Bands &amp; Moving Averages loading…</div>
-          <div style={{color:'#334155',fontSize:'.7rem',marginTop:3}}>Fetching 200 days of price history</div>
+        <div style={{background:'#0f172a',borderRadius:10,padding:'12px 14px',marginBottom:12,textAlign:'center',border:'1px solid #1e293b'}}>
+          <div style={{color:'#64748b',fontSize:'.8rem',marginBottom:4}}>📊 Chart Data Unavailable</div>
+          <div style={{color:'#475569',fontSize:'.72rem',lineHeight:1.5}}>Bollinger Bands, Moving Averages &amp; S/R levels require chart history.<br/>Search the ticker again to retry.</div>
         </div>
       )}
 
